@@ -167,7 +167,16 @@ Pre-checks from ssh (2026-10-02 22:31), before Charles's ten minutes:
   for Chrome is selected by `ELECTRON_OZONE_PLATFORM_HINT`/`--ozone-platform-hint=auto`
   only if Chrome honours it; `chrome://gpu` says which.
 
-(Charles's acceptance test pending.)
+Charles, chrome://gpu, 2026-10-02 22:35: **Chrome graphics pass.** Native
+Wayland confirmed; hardware compositing, rasterization and WebGL all active
+on VirGL / Apple M4 Pro; zero GPU-process crashes. Hardware video decode is
+not available (VA-API initialisation fails, `vaInitialize failed: unknown
+libva error`), which is the architecture's known limit: video decodes on the
+CPU, and smooth 1080p playback is the acceptance bar, not hardware decode.
+No Chrome GPU fallback flag was needed.
+
+Still Charles's to call: video playback with sound, mic in a browser,
+two-finger scroll, pinch, drag-resize feel, Firefox.
 
 ## Phase 4: clipboard and shared folder
 
