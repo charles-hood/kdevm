@@ -110,35 +110,28 @@ st=$(zsh -c "source $REPO/lib/kdevm-common.zsh; pid_state $SL4 'not-the-start' '
 [[ "$st" == absent ]] && pass "pid_state: same command, different start time is absent (reused pid)" || fail "pid_state different start gave '$st'"
 kill $SL4 2>/dev/null; wait $SL4 2>/dev/null
 
-# 5. lock (finding 5): fail-closed, no automatic takeover
-mkdir -p "$T/v5/lock"; sleep 120 & H=$!; echo $H > "$T/v5/lock/pid"
-out=$(KDEVM_STATE="$T/v5" ./kdevm.sh down 2>&1); rc=$?
-[[ $rc -ne 0 && "$out" == *"another kdevm command"* ]] && pass "lock held by a live process blocks" || fail "lock held by a live process (rc=$rc)"
-out=$(KDEVM_STATE="$T/v5" ./kdevm.sh unlock 2>&1); rc=$?
-[[ $rc -ne 0 && -d "$T/v5/lock" ]] && pass "unlock refuses while the owner is alive" || fail "unlock removed a live owner's lock (rc=$rc)"
-kill $H 2>/dev/null; wait $H 2>/dev/null
-echo 999999 > "$T/v5/lock/pid"
-out=$(KDEVM_STATE="$T/v5" ./kdevm.sh down 2>&1); rc=$?
-[[ $rc -ne 0 && "$out" == *"stale lock"* && "$out" == *unlock* && -d "$T/v5/lock" ]] && pass "stale lock (dead owner): command refuses and names unlock, lock untouched" || fail "stale lock handling (rc=$rc: $out)"
-out=$(KDEVM_STATE="$T/v5" ./kdevm.sh unlock 2>&1); rc=$?
-[[ $rc -eq 0 && ! -d "$T/v5/lock" ]] && pass "unlock removes a lock whose owner is gone" || fail "unlock with dead owner (rc=$rc)"
-KDEVM_STATE="$T/v5" ./kdevm.sh down >/dev/null 2>&1; rc=$?
-[[ $rc -eq 0 && ! -d "$T/v5/lock" ]] && pass "command runs after unlock and releases its lock" || fail "post-unlock run (rc=$rc)"
-# 5b. the lock must cover the whole operation and overlapping commands must serialise
-mkdir -p "$T/v5b"
-KDEVM_STATE="$T/v5b" ./kdevm.sh _lockprobe 3 > "$T/v5b/a.out" 2>&1 &
-A=$!; sleep 0.5
-[[ -d "$T/v5b/lock" ]] && pass "lock exists during the held section (script-scope trap)" || fail "lock already gone during the held section"
-KDEVM_STATE="$T/v5b" ./kdevm.sh _lockprobe 3 > "$T/v5b/b.out" 2>&1; rcB=$?
+# 5. lock (finding 5): kernel advisory lock (zsystem flock), held for the
+#    command's lifetime, released by the OS however the holder ends
+# 5a. two concurrent lifecycle commands: exactly one proceeds
+mkdir -p "$T/v5"
+KDEVM_STATE="$T/v5" ./kdevm.sh _lockprobe 3 > "$T/v5/a.out" 2>&1 & A=$!; sleep 0.5
+KDEVM_STATE="$T/v5" ./kdevm.sh _lockprobe 3 > "$T/v5/b.out" 2>&1; rcB=$?
 wait $A; rcA=$?
-if [[ $rcA -eq 0 && $rcB -ne 0 && "$(cat "$T/v5b/a.out")" == held && "$(cat "$T/v5b/b.out")" == *"another kdevm command"* ]]; then pass "overlapping commands: exactly one held the lock, the other was refused"; else fail "overlapping commands (A=$rcA B=$rcB)"; fi
-[[ ! -d "$T/v5b/lock" ]] && pass "lock released after the holder exited" || fail "lock left behind after exit"
-# 5c. an EMPTY directory at the lock path has no owner and is not a lock:
-#     rename(2) replaces it atomically (only one contender can win), so the
-#     command proceeds and releases normally
-mkdir -p "$T/v5c/lock"
-out=$(KDEVM_STATE="$T/v5c" ./kdevm.sh down 2>&1); rc=$?
-[[ $rc -eq 0 && ! -d "$T/v5c/lock" ]] && pass "empty directory at the lock path: replaced atomically, released after" || fail "empty lock dir (rc=$rc)"
+if [[ $rcA -eq 0 && $rcB -ne 0 && "$(cat "$T/v5/a.out")" == held && "$(cat "$T/v5/b.out")" == *"another kdevm command is running"* ]]; then pass "two concurrent commands: one held the lock, the other was refused"; else fail "concurrent commands (A=$rcA B=$rcB)"; fi
+# 5b. abnormal death of the holder (SIGKILL), then acquisition succeeds at once
+KDEVM_STATE="$T/v5" ./kdevm.sh _lockprobe 60 > "$T/v5/c.out" 2>&1 & C=$!; sleep 0.5
+[[ "$(cat "$T/v5/c.out")" == held ]] || fail "holder did not take the lock"
+kill -9 $C; wait $C 2>/dev/null
+out=$(KDEVM_STATE="$T/v5" ./kdevm.sh _lockprobe 0 2>&1); rc=$?
+[[ $rc -eq 0 && "$out" == held ]] && pass "holder SIGKILLed: next command acquired the lock immediately, nothing to clean" || fail "after SIGKILL (rc=$rc: $out)"
+# 5c. a detached child that inherited the holder's descriptors does not keep the lock
+out=$(KDEVM_STATE="$T/v5" ./kdevm.sh _lockprobe_spawn 2>&1); child="${out#held }"
+out2=$(KDEVM_STATE="$T/v5" ./kdevm.sh _lockprobe 0 2>&1); rc=$?
+if [[ $rc -eq 0 && "$out2" == held ]] && kill -0 "$child" 2>/dev/null; then pass "lock is per process: free after the holder exits although its child lives on"; else fail "inherited descriptor kept the lock (rc=$rc)"; fi
+kill "$child" 2>/dev/null
+# 5d. the lock file is private and no owner metadata exists
+[[ "$(stat -f %Lp "$T/v5/lock")" == 600 && ! -d "$T/v5/lock" ]] && pass "lock is a 0600 file, no pid metadata" || fail "lock file mode/type"
+
 # 5f. a lock-refused factory build must not touch the active build's seed
 mkdir -p "$T/v5f/lock"; sleep 120 & LH2=$!; echo $LH2 > "$T/v5f/lock/pid"; printf 'seed' > "$T/v5f/seed.iso"
 out=$(KDEVM_STATE="$T/v5f" ./guest/build.sh 2>&1); rc=$?

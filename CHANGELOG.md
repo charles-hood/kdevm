@@ -40,14 +40,16 @@ helper fails on EOF and error replies, a QEMU that never becomes ready is
 terminated before its identity is dropped, and a build that was refused the
 lock touches nothing. The shared logic lives in `lib/kdevm-common.zsh`.
 
-A fourth pass ended the lock story by design decision: no automatic stale
-takeover at all. The lock is fail-closed and `kdevm.sh unlock` is the one
-explicit recovery, refusing while the owner runs. Start-time inspection
-failures are now `unknown` rather than `absent`, and a child whose start
-time cannot be recorded is terminated instead of orphaned.
+A fourth pass made start-time inspection failures `unknown` rather than
+`absent` and terminates a child whose start time cannot be recorded. A fifth
+pass replaced the lock outright: it is now a kernel-managed advisory lock
+(`zsystem flock` from the stock zsh) held on a descriptor for the command's
+lifetime and released by the OS on exit, error, crash or SIGKILL. No owner
+metadata, no stale-lock recovery, no `unlock` verb.
 
-`tests/checks.sh` keeps every probe from all four passes runnable offline
-(34 checks, including fake `ps`, fake QMP servers and a fake QEMU).
+`tests/checks.sh` keeps every probe from all five passes runnable offline
+(29 checks, including fake `ps`, fake QMP servers, a fake QEMU, and a
+SIGKILLed lock holder).
 
 - Runtime: try-omarchy's patched QEMU 11.1.1 (HVF, Cocoa + VirGL, libslirp,
   SDL duplex audio, virtio-9p) built by their own script from a pinned

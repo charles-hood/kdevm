@@ -61,14 +61,13 @@ fi
 chmod 600 "$PASS_FILE" 2>/dev/null || true
 [[ -n "$SSH_PUB" && -f "$SSH_PUB" ]] || die "no ssh public key found; set KDEVM_SSH_PUB or run ssh-keygen -t ed25519"
 install -d -m 700 "$STATE"; chmod 700 "$STATE"
-LOCK="$STATE/lock"
 # cleanup() undoes everything this invocation did after it OWNED the build:
 # kill the provisioning VM, keep a half-built disk as factory.qcow2.failed
-# (owner-only), remove the seed (plaintext password) and the vars copy,
-# release the lock if this process took it. Each step is non-fatal so one
-# failing step (an already-exited QEMU) cannot skip the rest. Before
-# ownership (a refused lock) it touches nothing: those files belong to the
-# build that holds the lock.
+# (owner-only), remove the seed (plaintext password) and the vars copy. The
+# lock needs no release: the kernel drops it with the process. Each step is
+# non-fatal so one failing step (an already-exited QEMU) cannot skip the
+# rest. Before ownership (a refused lock) it touches nothing: those files
+# belong to the build that holds the lock.
 QPID=""; WORK=""; PROV_VARS=""; SEED_DIR=""; OWNED=0
 cleanup() {
   set +e
@@ -78,7 +77,6 @@ cleanup() {
     rm -f "$PROV_VARS" "$STATE/seed.iso" 2>/dev/null
     [[ -n "$SEED_DIR" ]] && rm -rf "$SEED_DIR"
   fi
-  release_lock
   return 0
 }
 trap cleanup EXIT
@@ -167,7 +165,7 @@ log "booting headless for provisioning (serial: $SERIAL)"
   -device virtio-blk-pci,drive=seed \
   -netdev user,id=net,hostfwd=tcp:127.0.0.1:$SSH_PORT-:22 -device virtio-net-pci,netdev=net,romfile= \
   -object rng-random,id=rng,filename=/dev/urandom -device virtio-rng-pci,rng=rng \
-  -display none -serial "file:$SERIAL" -monitor none &
+  -display none -serial "file:$SERIAL" -monitor none {KDEVM_LOCK_FD}<&- &
 # romfile= : the runtime ships no option ROMs (no share/qemu), and the guest
 # boots from UEFI + disk, so no device needs one (try-omarchy does the same).
 QPID=$!

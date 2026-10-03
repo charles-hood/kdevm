@@ -87,7 +87,6 @@ kdevm.sh rebuild     new factory (fresh packages, fresh Chrome), new overlay
 kdevm.sh status      the first diagnostic command
 kdevm.sh ssh [cmd]   ssh <user>@localhost:2222
 kdevm.sh console     tail the guest serial log
-kdevm.sh unlock      remove a stale lock left by a crashed command (refuses while its owner runs)
 ```
 
 ## Configuration
@@ -114,7 +113,7 @@ every script):
 
 | | |
 |---|---|
-| the repo | `kdevm.sh`, `lib/kdevm-common.zsh` (lock, process identity, QMP, config), the build scripts, the cloud-init template, vendored guest agents, `tests/checks.sh`, docs. Nothing large, nothing secret. |
+| the repo | `kdevm.sh`, `lib/kdevm-common.zsh` (kernel lock, process identity, QMP, config), the build scripts, the cloud-init template, vendored guest agents, `tests/checks.sh`, docs. Nothing large, nothing secret. |
 | `$KDEVM_RUNTIME_ROOT/<pin>/` | built QEMU + helper, `provenance.txt`, `current` symlink. Slow to rebuild, keep it. |
 | `$KDEVM_STATE/` | base image, `factory.qcow2`, `work.qcow2`, `efivars.fd`, `run/` sockets, logs. Disposable. |
 | `$KDEVM_SHARE/` | the one shared folder. An exchange folder, not a build tree. |
@@ -163,11 +162,12 @@ fw_cfg opt/kdevm/*         <-- per-launch hints (scale)                     <-- 
   it bypasses PAM and would have to go for a Touch ID sudo integration).
   The guest reaches the network through user-mode slirp; only ssh is
   forwarded, to loopback.
-- **Fail-closed lifecycle.** One lock per state directory. A command
-  that finds the lock held exits and names the owner; a crashed command
-  leaves its lock for you to remove with `kdevm.sh unlock`, which refuses
-  while the owner is alive. A VM whose process cannot be inspected is
-  reported as UNKNOWN and no verb will touch it until you resolve it.
+- **Fail-closed lifecycle.** One kernel advisory lock per state directory
+  (`zsystem flock`, stock zsh), held for the command's lifetime and released
+  by the OS however the command ends, crash and SIGKILL included. A command
+  that finds it held exits: another command is running. A VM whose process
+  cannot be inspected is reported as UNKNOWN and no verb will touch it until
+  you resolve it.
 - **Not an app bundle.** The runtime is ad-hoc signed, so a rebuilt
   runtime has a new identity and macOS re-asks the microphone permission.
 

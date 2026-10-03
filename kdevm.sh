@@ -15,7 +15,6 @@
 #   kdevm.sh status      the first diagnostic command
 #   kdevm.sh ssh [cmd]   ssh into the guest on localhost:2222
 #   kdevm.sh console     tail the guest serial log
-#   kdevm.sh unlock      remove a stale lock left by a crashed command (refuses if its owner runs)
 #
 # Config: environment variables, optionally set in ~/.config/kdevm/env
 # (sourced if present). KDEVM_CPUS (4) KDEVM_MEM_MB (8192) KDEVM_SCALE
@@ -54,10 +53,8 @@ SERIAL="$STATE/serial.log"
 PIDFILE="$STATE/qemu.pid"
 BRIDGEPID="$STATE/clipboard-bridge.pid"
 KNOWN_HOSTS="$STATE/known_hosts"
-LOCK="$STATE/lock"
 SSH_OPTS=(-p "$SSH_PORT" -o UserKnownHostsFile="$KNOWN_HOSTS" -o StrictHostKeyChecking=no
           -o LogLevel=ERROR -o ConnectTimeout=5)
-trap release_lock EXIT           # script scope: covers the whole command
 
 QEMU_PATTERN="*${QEMU}*file=${WORK}*"
 BRIDGE_PATTERN="kdevm-bridge-supervisor *"
@@ -176,7 +173,7 @@ up() {
     -device virtserialport,bus=vser.0,nr=2,chardev=clip,name=dev.tryomarchy.clipboard \
     -fw_cfg "name=opt/kdevm/scale,string=$scale" \
     -qmp "unix:$QMP,server=on,wait=off" -serial "file:$SERIAL" -monitor none \
-    >"$STATE/qemu.out" 2>&1 &
+    >"$STATE/qemu.out" 2>&1 {KDEVM_LOCK_FD}<&- &
   local pid=$! start
   # The child is ours from this moment: any failure to record its identity
   # terminates it (TERM, wait, KILL) before the command exits.
@@ -221,7 +218,7 @@ up() {
     while kill -0 "$qpid" 2>/dev/null; do
       "$helper" --bridge-native-clipboard "$qpid" "$sock" >>"$logf" 2>&1 || true
       kill -0 "$qpid" 2>/dev/null && sleep 1
-    done' kdevm-bridge-supervisor "$HELPER" "$pid" "$CLIP" "$STATE/clipboard-bridge.log" </dev/null >/dev/null 2>&1 &
+    done' kdevm-bridge-supervisor "$HELPER" "$pid" "$CLIP" "$STATE/clipboard-bridge.log" </dev/null >/dev/null 2>&1 {KDEVM_LOCK_FD}<&- &
   local spid=$! sstart
   sstart=$(proc_start $spid) || sstart=""
   if [[ -n "$sstart" ]]; then
@@ -352,7 +349,9 @@ case "${1:-}" in
   status)    status ;;
   ssh)       ssh_guest "${@:2}" ;;
   console)   tail -n 50 -f "$SERIAL" ;;
-  unlock)    unlock ;;
-  _lockprobe) take_lock; echo "held"; sleep "${2:-3}" ;;   # for tests/checks.sh: hold the lock for N seconds
-  *) echo "usage: kdevm.sh {runtime|factory|up|launch|preflight|down|destroy [--all]|rebuild|status|ssh [cmd]|console|unlock}"; exit 1 ;;
+  # for tests/checks.sh: hold the lock for N seconds; _lockprobe_spawn also
+  # leaves a detached child (inherits fds) behind and exits at once
+  _lockprobe) take_lock; echo "held"; sleep "${2:-3}" ;;
+  _lockprobe_spawn) take_lock; sleep 30 </dev/null >/dev/null 2>&1 & disown; echo "held $!" ;;
+  *) echo "usage: kdevm.sh {runtime|factory|up|launch|preflight|down|destroy [--all]|rebuild|status|ssh [cmd]|console}"; exit 1 ;;
 esac

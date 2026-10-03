@@ -142,6 +142,31 @@ untrackable supervisor rather than leaving it. Probes added for each
 (fake `ps` that fails only `lstart=`, launch with that `ps`, unlock with a
 live and a dead owner); 34 checks pass.
 
+### Fifth pass (Codex, commit 5481e4a): the lock, settled by design
+
+Codex found two holes in the new `unlock` verb (it treated an unverifiable
+owner as gone, and two concurrent unlocks could remove a lock acquired
+between them). Charles's direction: before patching, check whether the
+stock zsh offers a kernel-managed advisory lock, and if so use it and delete
+the custom machinery. It does. Verified 2026-10-03 on `/bin/zsh` 5.9:
+`zmodload zsh/system` loads, `zsystem flock -t 0` refuses a second process
+while a holder lives, the kernel released the lock after the holder was
+SIGKILLed, a detached child that inherited the descriptor did not keep the
+lock after its parent exited (per-process record-lock semantics), and
+`-t 1` times out with status 2 after one second.
+
+So the lock is now `$STATE/lock`, a 0600 file, locked by `zsystem flock`
+on a descriptor of the command's process for its lifetime. There is no
+owner pid, no stale state, no takeover, no unlock verb: a held lock means a
+live command. Long-lived children (QEMU, the clipboard supervisor, the
+provisioning VM) are started with that descriptor closed. `KDEVM_LOCKED=1`
+still tells the factory builder that its caller holds the lock and will
+wait for it. The pid plus start-time identity stays, only for the
+long-lived QEMU and supervisor processes. Tests: two concurrent commands
+serialise; a SIGKILLed holder is followed by an immediate successful
+acquisition with nothing to clean; a detached child does not keep the lock;
+the lock file is 0600 with no metadata. 29 checks pass.
+
 ## Rules that are easy to forget
 
 - `gic-version=3` is mandatory under HVF on this QEMU; it rejects GICv2.
@@ -150,6 +175,9 @@ live and a dead owner); 34 checks pass.
 - The `generic` Debian image, not `genericcloud`: the cloud kernel lacks
   virtio_gpu, snd_hda_intel and friends. `guest/build.sh` fails the factory
   if any required module or CONFIG is missing.
+- The lifecycle lock is a kernel advisory lock (`zsystem flock`) on
+  `$STATE/lock`, held by the command's process. Nothing to clean after a
+  crash. If a command says another is running, one is.
 - NOPASSWD sudo in the guest is a temporary convenience (same as the
   container). It bypasses PAM and must go if Touch ID sudo is ever wired in.
 - Per-launch hints reach the guest through QEMU `fw_cfg`

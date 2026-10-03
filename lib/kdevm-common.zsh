@@ -57,43 +57,24 @@ pid_state() {
 }
 
 # ---- lock ------------------------------------------------------------------
-# One lock directory per state directory, taken by every state-changing verb
-# and by the factory build (which skips it when KDEVM_LOCKED=1 says the
-# caller already holds it). Acquisition is one atomic rename of a directory
-# that already contains the owner pid, so the lock never exists without its
-# owner recorded. FAIL-CLOSED: if the lock exists, the command exits, whether
-# the owner is alive (wait for it) or gone (a crash left it: run
-# `kdevm.sh unlock`, which removes it only after verifying the owner is not
-# running). There is no automatic takeover. An EMPTY directory at the lock
-# path has no owner and is not a lock: rename(2) replaces it atomically, and
-# only one contender's rename can win.
-lock_owner() { cat "$LOCK/pid" 2>/dev/null || true; }
-holder_alive() { [[ "$1" =~ ^[1-9][0-9]*$ ]] && kill -0 "$1" 2>/dev/null; }
+# One kernel-managed advisory lock per state directory (zsh/system's
+# `zsystem flock`, stock zsh on macOS), taken by every state-changing verb and
+# by the factory build (which skips it when KDEVM_LOCKED=1 says the caller
+# already holds it and will wait for it). The lock lives on an open file
+# descriptor of THIS process: the kernel releases it on normal exit, error,
+# crash or SIGKILL, and a child that inherits the descriptor does not hold it
+# (POSIX record-lock semantics, verified 2026-10-03). So there is nothing to
+# release, no owner metadata, no stale lock and no takeover: if the lock is
+# held, the other command is alive by definition; wait for it.
+zmodload zsh/system 2>/dev/null || die "zsh/system module unavailable (kdevm needs the stock macOS zsh)"
 take_lock() {
-  local holder tmp
   install -d -m 700 "$STATE"
-  LOCK="${LOCK:-$STATE/lock}"
-  tmp="$LOCK.new.$$"; rm -rf "$tmp"
-  mkdir -m 700 "$tmp" && echo $$ > "$tmp/pid"
-  if python3 -c 'import os, sys; os.rename(sys.argv[1], sys.argv[2])' "$tmp" "$LOCK" 2>/dev/null; then
-    KDEVM_LOCK_HELD=1; export KDEVM_LOCKED=1; return 0
+  LOCKFILE="$STATE/lock"
+  : >> "$LOCKFILE"
+  if ! zsystem flock -f KDEVM_LOCK_FD -t 0 "$LOCKFILE" 2>/dev/null; then
+    die "another kdevm command is running on $STATE; wait for it"
   fi
-  rm -rf "$tmp"
-  holder=$(lock_owner)
-  if holder_alive "$holder"; then
-    die "another kdevm command is running (pid $holder); wait for it"
-  fi
-  die "stale lock at $LOCK (owner pid '${holder:-?}' is not running); check nothing of kdevm's is still running, then: kdevm.sh unlock"
-}
-# Only the process that took the lock releases it, and only if it still owns it.
-release_lock() { [[ -n "${KDEVM_LOCK_HELD:-}" && "$(lock_owner)" == "$$" ]] && rm -rf "$LOCK"; return 0; }
-# Explicit stale-lock recovery: refuses while the recorded owner is alive.
-unlock() {
-  LOCK="${LOCK:-$STATE/lock}"
-  [[ -d "$LOCK" ]] || { log "no lock at $LOCK"; return 0; }
-  local holder; holder=$(lock_owner)
-  holder_alive "$holder" && die "lock owner pid $holder is still running; not removing $LOCK"
-  rm -rf "$LOCK"; log "removed stale lock $LOCK (owner pid '${holder:-?}' not running)"
+  export KDEVM_LOCKED=1
 }
 
 # ---- QMP -------------------------------------------------------------------
