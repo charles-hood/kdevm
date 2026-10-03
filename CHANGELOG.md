@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- **The guest's default memory follows the Mac's.** A Mac with less than
+  16 GB now gets a 4 GB guest; every other Mac keeps 8 GB, so nothing
+  changes on 16 GB and up. The flat 8 GB default used to promise an 8 GB
+  Mac's whole memory to the guest. `KDEVM_MEM_MB` still overrides, and the
+  setting applies at the next `up` with nothing to rebuild. kdevm has
+  never been run on a Mac with less than 16 GB, so whether it works there
+  at all is unknown; the README says so.
+
 ## 0.2.1 (2026-10-03)
 
 A first-run release: what a newcomer meets between `git clone` and a

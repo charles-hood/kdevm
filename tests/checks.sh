@@ -452,6 +452,22 @@ mkdir -p "$T/home/.config/kdevm"; printf 'QEMU_IMG=/custom/qemu-img\nKDEVM_USER=
 got=$(HOME="$T/home" KDEVM_USER= zsh -f -c "source $REPO/lib/kdevm-common.zsh; kdevm_load_env; print -r -- \"\${QEMU_IMG}|\${KDEVM_USER-unset}|\${KDEVM_MEM_MB}\"")
 [[ "$got" == "/custom/qemu-img||1234" ]] && pass "config loader: non-KDEVM keys kept, explicit empty value respected" || fail "config loader ($got)"
 
+# 8b. guest RAM default follows the host: under 16 GB gets 4096, everything
+#     else 8192; an explicit KDEVM_MEM_MB wins; an unreadable host size keeps
+#     8192. A fake sysctl reports the host size, an empty HOME keeps the
+#     user's own env file out, and status prints the value it resolved.
+mkdir -p "$T/memstub" "$T/home8b" "$T/v8b"
+printf '#!/bin/sh\n[ "$KDEVM_TEST_MEMSIZE" = fail ] && exit 1\necho "$KDEVM_TEST_MEMSIZE"\n' > "$T/memstub/sysctl"; chmod +x "$T/memstub/sysctl"
+mem8b() { # host bytes (or "fail"), optional KDEVM_MEM_MB -> the MB status reports
+  HOME="$T/home8b" PATH="$T/memstub:$PATH" KDEVM_TEST_MEMSIZE="$1" KDEVM_MEM_MB="${2:-}" KDEVM_STATE="$T/v8b" KDEVM_RUNTIME_ROOT="$T/fakert4" ./kdevm.sh status 2>/dev/null | sed -n 's/^-- config: .* vCPU, \([0-9]*\) MB,.*/\1/p'
+}
+got="$(mem8b $((8 * 1024 ** 3)))|$(mem8b $((16 * 1024 ** 3 - 1)))|$(mem8b $((16 * 1024 ** 3)))|$(mem8b $((48 * 1024 ** 3)))|$(mem8b $((128 * 1024 ** 3)))"
+[[ "$got" == "4096|4096|8192|8192|8192" ]] && pass "guest RAM default: 4096 MB on a host under 16 GB, 8192 MB at 16 GB and above" || fail "guest RAM default by host size ($got)"
+got="$(mem8b $((8 * 1024 ** 3)) 6000)|$(mem8b $((128 * 1024 ** 3)) 2048)"
+[[ "$got" == "6000|2048" ]] && pass "guest RAM default: an explicit KDEVM_MEM_MB wins on any host" || fail "explicit KDEVM_MEM_MB ($got)"
+got="$(mem8b fail)|$(mem8b garbage)|$(mem8b "")"
+[[ "$got" == "8192|8192|8192" ]] && pass "guest RAM default: a host size that cannot be read keeps 8192 MB" || fail "unreadable host size ($got)"
+
 
 # 9. QMP helper strictness: success only on a "return"; EOF and error replies fail
 qmp_server() { # socket mode(close|error|ok)

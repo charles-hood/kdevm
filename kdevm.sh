@@ -18,7 +18,8 @@
 #   kdevm.sh console     tail the guest serial log
 #
 # Config: environment variables, optionally set in ~/.config/kdevm/env
-# (sourced if present). KDEVM_CPUS (4) KDEVM_MEM_MB (8192) KDEVM_SCALE
+# (sourced if present). KDEVM_CPUS (4) KDEVM_MEM_MB (8192; 4096 on a Mac
+# with less than 16 GB) KDEVM_SCALE
 # (auto|1|2) KDEVM_SHARE (~/kdevm-share) KDEVM_FULLSCREEN (off) KDEVM_WINDOW
 # (auto|keep|WxH) KDEVM_ICON (assets/kdevm-icon.png) KDEVM_TIMEZONE
 # (mirror|off) KDEVM_USER (your login name) KDEVM_RUNTIME_ROOT
@@ -41,7 +42,11 @@ FW_VARS_TEMPLATE="${KDEVM_FW_VARS:-/opt/homebrew/share/qemu/edk2-arm-vars.fd}"
 USER_NAME="${KDEVM_USER:-$(id -un)}"
 SSH_PORT="${KDEVM_SSH_PORT:-2222}"
 CPUS="${KDEVM_CPUS:-4}"
-MEM_MB="${KDEVM_MEM_MB:-8192}"
+# Guest RAM default by host RAM: 4 GB on a Mac with less than 16 GB, 8 GB on
+# every other; a host size that cannot be read counts as large.
+HOST_MEM_BYTES=$(sysctl -n hw.memsize 2>/dev/null) || HOST_MEM_BYTES=0
+[[ "$HOST_MEM_BYTES" == <-> ]] || HOST_MEM_BYTES=0
+MEM_MB="${KDEVM_MEM_MB:-$(( HOST_MEM_BYTES > 0 && HOST_MEM_BYTES < 16 * 1024 ** 3 ? 4096 : 8192 ))}"
 SHARE="${KDEVM_SHARE:-$HOME/kdevm-share}"
 FULLSCREEN="${KDEVM_FULLSCREEN:-off}"
 TIMEZONE="${KDEVM_TIMEZONE:-mirror}"   # mirror: the guest follows the Mac's time zone; off: no port, no bridge

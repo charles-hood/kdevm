@@ -42,6 +42,13 @@ Linux image). After that the desktop opens in about 15 seconds.
   by following this page. The VM software underneath supports macOS 15 and
   newer, but nobody has tried kdevm there yet;
   [reports are welcome](CONTRIBUTING.md).
+- 16 GB of memory or more. Both Macs above have more (18 and 48 GB) and
+  give the guest 8 GB. On a Mac with less than 16 GB the default drops to
+  a 4 GB guest, but kdevm has never been run on such a Mac and nobody
+  knows whether it works there at all. A 4 GB guest was tried on the
+  48 GB Mac: the desktop and both browsers worked, but with heavy web
+  graphics the VM's process took 7 to 8 GB of the Mac's memory, more than
+  the guest's own 4 GB, which an 8 GB Mac does not have to give.
 - Xcode or the Command Line Tools (`xcode-select --install`), for clang,
   Swift 6 and codesign.
 - [Homebrew](https://brew.sh), in its usual place (`/opt/homebrew`), with
@@ -158,7 +165,7 @@ every script):
 | variable | default | meaning |
 |---|---|---|
 | `KDEVM_CPUS` | 4 | vCPUs (try-omarchy's documented minimum) |
-| `KDEVM_MEM_MB` | 8192 | guest RAM; unused pages are returned to macOS |
+| `KDEVM_MEM_MB` | 8192; 4096 on a Mac with less than 16 GB | guest RAM; unused pages are returned to macOS |
 | `KDEVM_SCALE` | auto | Plasma scale hint: auto = main display pixels / points, or 1, 2 |
 | `KDEVM_WINDOW` | auto | first-window size: auto (display minus margins), keep, or `WxH` points |
 | `KDEVM_FULLSCREEN` | off | open full screen |
