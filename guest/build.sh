@@ -15,14 +15,15 @@ set -euo pipefail
 umask 077   # disks, seed (holds the plaintext password), vars: owner-only from creation
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-# ~/.config/kdevm/env holds defaults; an explicit environment variable wins.
-# Only KDEVM_* assignments are read; values may reference $HOME.
+# ~/.config/kdevm/env holds defaults; a variable already set in the
+# environment (even to the empty string) wins. Any NAME=value line is read
+# (KDEVM_*, QEMU_IMG, ...); values may reference $HOME.
 kdevm_load_env() {
   local f="$HOME/.config/kdevm/env" line k v; [[ -f "$f" ]] || return 0
   while IFS= read -r line || [[ -n "$line" ]]; do
-    [[ "$line" =~ '^[[:space:]]*(export[[:space:]]+)?(KDEVM_[A-Z_]+)=(.*)$' ]] || continue
+    [[ "$line" =~ '^[[:space:]]*(export[[:space:]]+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$' ]] || continue
     k="${match[2]}"; v="${match[3]}"
-    [[ -n "${(P)k:-}" ]] && continue
+    [[ -n "${(P)k+set}" ]] && continue
     eval "export $k=$v"
   done < "$f"
 }
@@ -70,6 +71,51 @@ if [[ ! -f "$PASS_FILE" ]]; then
 fi
 chmod 600 "$PASS_FILE" 2>/dev/null || true
 [[ -n "$SSH_PUB" && -f "$SSH_PUB" ]] || die "no ssh public key found; set KDEVM_SSH_PUB or run ssh-keygen -t ed25519"
+install -d -m 700 "$STATE"; chmod 700 "$STATE"
+# One lock per state directory shared with kdevm.sh, which sets
+# KDEVM_LOCKED=1 when it already holds it. mkdir is atomic. A lock
+# whose recorded holder is dead is taken over EXCLUSIVELY: contenders race
+# to rename it away, only one rename succeeds, and the loser's next mkdir
+# finds the winner's fresh lock. Released by the script-scope EXIT trap
+# (a trap set inside a function would fire when the function returns).
+LOCK="$STATE/lock"
+take_lock() {
+  local attempt holder
+  install -d -m 700 "$STATE"
+  for attempt in 1 2 3 4 5; do
+    if mkdir "$LOCK" 2>/dev/null; then
+      echo $$ > "$LOCK/pid"; KDEVM_LOCK_HELD=1; export KDEVM_LOCKED=1; return 0
+    fi
+    holder=$(cat "$LOCK/pid" 2>/dev/null || echo 0)
+    if [[ "$holder" =~ ^[1-9][0-9]*$ ]] && kill -0 "$holder" 2>/dev/null; then
+      die "another kdevm command is running (pid $holder); wait for it"
+    fi
+    mv "$LOCK" "$LOCK.stale.$$" 2>/dev/null && rm -rf "$LOCK.stale.$$"
+    sleep 0.2
+  done
+  die "cannot take the lock $LOCK"
+}
+kdevm_exit() { [[ -n "${KDEVM_LOCK_HELD:-}" ]] && rm -rf "$LOCK"; return 0; }
+trap kdevm_exit EXIT
+# Everything that can fail or be interrupted after this point is undone by
+# cleanup(): kill the provisioning VM, keep a half-built disk as
+# factory.qcow2.failed (owner-only), remove the seed (plaintext password)
+# and the vars copy, release the lock. Each step is non-fatal so one failing
+# step (an already-exited QEMU) cannot skip the rest.
+QPID=""; WORK=""; PROV_VARS=""; SEED_DIR=""
+cleanup() {
+  set +e
+  [[ -n "$QPID" ]] && kill "$QPID" 2>/dev/null
+  [[ -n "$WORK" && -f "$WORK" ]] && mv -f "$WORK" "$FACTORY.failed" 2>/dev/null
+  rm -f "$PROV_VARS" "$STATE/seed.iso" 2>/dev/null
+  [[ -n "$SEED_DIR" ]] && rm -rf "$SEED_DIR"
+  [[ -n "${KDEVM_LOCK_HELD:-}" ]] && rm -rf "$LOCK"
+  return 0
+}
+trap cleanup EXIT
+[[ "${KDEVM_LOCKED:-}" == 1 ]] || take_lock
+
+# Guards, under the lock (a concurrent command cannot change the answer).
 if [[ -f "$FACTORY" && "${1:-}" != --force ]]; then
   die "$FACTORY exists; use 'kdevm.sh rebuild' or --force"
 fi
@@ -78,20 +124,6 @@ fi
 # overlay first; a direct --force must not.
 [[ -f "$STATE/work.qcow2" ]] && die "an overlay ($STATE/work.qcow2) still backs the current factory; use 'kdevm.sh rebuild' (drops it) or 'kdevm.sh destroy' first"
 pgrep -qf "file=$STATE/(factory|work).qcow2" && die "a kdevm VM is running; 'kdevm.sh down' first"
-
-install -d -m 700 "$STATE"; chmod 700 "$STATE"
-# One lock per state directory, shared with kdevm.sh (which sets KDEVM_LOCKED
-# when it already holds it). mkdir is atomic; a dead holder's lock is reclaimed.
-LOCK="$STATE/lock"
-if [[ "${KDEVM_LOCKED:-}" != 1 ]]; then
-  if ! mkdir "$LOCK" 2>/dev/null; then
-    holder=$(cat "$LOCK/pid" 2>/dev/null || echo 0)
-    kill -0 "$holder" 2>/dev/null && die "another kdevm command is running (pid $holder)"
-    rm -rf "$LOCK"; mkdir "$LOCK" || die "cannot take the lock $LOCK"
-  fi
-  echo $$ > "$LOCK/pid"
-  trap 'rm -rf "$LOCK"' EXIT
-fi
 t0=$(date +%s)
 
 # ---- 1. base image, verified ------------------------------------------------
@@ -123,13 +155,16 @@ python3 - "$REPO/guest/user-data.yaml.tmpl" "$SEED_DIR/user-data" \
 import base64, json, os, sys
 tmpl, out, agent, unit, udev, quantum, firefox = sys.argv[1:]
 b64 = lambda p: base64.b64encode(open(p, "rb").read()).decode()
-text = open(tmpl).read()
+text = open(tmpl, encoding="utf-8").read()
 for k, v in {
     "@@USER@@": os.environ["KDEVM_USER_NAME"],
     # JSON strings are valid YAML double-quoted scalars: any password survives
     # (&, |, #, a leading digit, quotes, backslashes).
-    "@@PASS@@": json.dumps(os.environ["KDEVM_PASS"]),
-    "@@SSHKEY@@": json.dumps(os.environ["KDEVM_SSHKEY"]),
+    # ensure_ascii=False: raw UTF-8 is valid inside a YAML double-quoted
+    # scalar, while JSON's \ud83d\udd11 surrogate pairs are not (PyYAML
+    # returns two surrogates for an emoji and the guest cannot encode them).
+    "@@PASS@@": json.dumps(os.environ["KDEVM_PASS"], ensure_ascii=False),
+    "@@SSHKEY@@": json.dumps(os.environ["KDEVM_SSHKEY"], ensure_ascii=False),
     "@@B64_CLIPBOARD_AGENT@@": b64(agent),
     "@@B64_CLIPBOARD_UNIT@@": b64(unit),
     "@@B64_CLIPBOARD_UDEV@@": b64(udev),
@@ -137,7 +172,7 @@ for k, v in {
     "@@B64_FIREFOX_POLICIES@@": b64(firefox),
 }.items():
     text = text.replace(k, v)
-open(out, "w").write(text)
+open(out, "w", encoding="utf-8").write(text)
 PY
 grep -q '@@' "$SEED_DIR/user-data" && die "unrendered token in user-data"
 printf 'instance-id: kdevm-factory-%s\nlocal-hostname: kdevm\n' "$(date +%Y%m%d%H%M%S)" > "$SEED_DIR/meta-data"
@@ -166,9 +201,6 @@ log "booting headless for provisioning (serial: $SERIAL)"
 # romfile= : the runtime ships no option ROMs (no share/qemu), and the guest
 # boots from UEFI + disk, so no device needs one (try-omarchy does the same).
 QPID=$!
-# On any failure after boot: keep the disk for inspection as factory.qcow2.failed
-# (owner-only), remove the seed (it holds the plaintext password) and the vars.
-trap 'kill $QPID 2>/dev/null; sleep 1; mv -f "$WORK" "$FACTORY.failed" 2>/dev/null; rm -f "$PROV_VARS" "$STATE/seed.iso"; rm -rf "$SEED_DIR"; [[ "${KDEVM_LOCKED:-}" == 1 ]] || rm -rf "$LOCK"' EXIT
 
 # ---- 5. wait for ssh, then for cloud-init -----------------------------------
 log "waiting for ssh on localhost:$SSH_PORT"
@@ -253,10 +285,10 @@ echo "$CHECKS"
 log "powering off"
 ssh "${SSH_OPTS[@]}" "$USER_NAME@localhost" 'sudo cloud-init clean --logs; sync; sudo poweroff' 2>/dev/null || true
 for i in {1..60}; do kill -0 $QPID 2>/dev/null || break; sleep 1; done
-kill -0 $QPID 2>/dev/null && { echo "QEMU still up after 60 s; killing" >&2; kill $QPID; sleep 1; }
-trap - EXIT; [[ "${KDEVM_LOCKED:-}" == 1 ]] || trap 'rm -rf "$LOCK"' EXIT
+kill -0 $QPID 2>/dev/null && { echo "QEMU still up after 60 s; killing" >&2; kill $QPID 2>/dev/null || true; sleep 1; }
+QPID=""
 rm -f "$PROV_VARS" "$STATE/seed.iso" "$KNOWN_HOSTS"; rm -rf "$SEED_DIR"
-mv "$WORK" "$FACTORY"; chmod 600 "$FACTORY"
+mv "$WORK" "$FACTORY"; chmod 600 "$FACTORY"   # cleanup() finds no WORK afterwards
 t2=$(date +%s)
 echo "factory time: $((t2 - t0)) s (ssh up at $(( t1 - t0 )) s incl. cloud-init)" >> "$INFO"
 log "factory ready: $FACTORY ($(du -h "$FACTORY" | cut -f1) on disk) in $((t2 - t0)) s"

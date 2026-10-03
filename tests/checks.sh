@@ -13,15 +13,19 @@ cd "$REPO"
 kdevm_load_env() {
   local f="$HOME/.config/kdevm/env" line k v; [[ -f "$f" ]] || return 0
   while IFS= read -r line || [[ -n "$line" ]]; do
-    [[ "$line" =~ '^[[:space:]]*(export[[:space:]]+)?(KDEVM_[A-Z_]+)=(.*)$' ]] || continue
+    [[ "$line" =~ '^[[:space:]]*(export[[:space:]]+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$' ]] || continue
     k="${match[2]}"; v="${match[3]}"
-    [[ -n "${(P)k:-}" ]] && continue
+    [[ -n "${(P)k+set}" ]] && continue
     eval "export $k=$v"
   done < "$f"
 }
 kdevm_load_env
 T="$(mktemp -d "${TMPDIR:-/tmp}/kdevm-checks.XXXXXX")"
 trap 'rm -rf "$T"' EXIT
+# Fixtures so no builder invocation can touch the user's real password or key.
+mkdir -p "$T/fx"; printf 'fixture-password' > "$T/fx/password"; chmod 600 "$T/fx/password"
+printf 'ssh-ed25519 AAAAFIXTURE checks\n' > "$T/fx/key.pub"
+export KDEVM_PASS_FILE="$T/fx/password" KDEVM_SSH_PUB="$T/fx/key.pub"
 fails=0
 pass() { echo "PASS  $1"; }
 fail() { echo "FAIL  $1"; fails=$((fails + 1)); }
@@ -31,7 +35,7 @@ need_runtime() { [[ -x "${KDEVM_RUNTIME_ROOT:-${XDG_DATA_HOME:-$HOME/.local/shar
 for f in kdevm.sh guest/build.sh runtime/build.sh tests/checks.sh; do
   zsh -n "$f" && pass "zsh -n $f" || fail "zsh -n $f"
 done
-python3 -m py_compile guest/vendor/omarchy-native-clipboard-bridge 2>/dev/null && pass "vendored clipboard agent compiles" || fail "vendored clipboard agent compiles"
+python3 -c 'compile(open("guest/vendor/omarchy-native-clipboard-bridge").read(), "agent", "exec")' 2>/dev/null && pass "vendored clipboard agent compiles (in memory, no bytecode written)" || fail "vendored clipboard agent compiles"
 python3 -c 'import json; json.load(open("guest/files/firefox-policies.json"))' && pass "firefox policies.json parses" || fail "firefox policies.json parses"
 
 # 1. password generation (review finding 1): no tr|head pipeline, 20 chars, mode 600, reused on a second run
@@ -48,7 +52,7 @@ fi
 # 3. factory --force refuses while an overlay exists (finding 3)
 if need_runtime; then
   mkdir -p "$T/v3"; : > "$T/v3/factory.qcow2"; : > "$T/v3/work.qcow2"
-  out=$(KDEVM_STATE="$T/v3" ./guest/build.sh --force 2>&1); rc=$?
+  out=$(KDEVM_STATE="$T/v3" KDEVM_PASS_FILE="$T/fx/password" KDEVM_SSH_PUB="$T/fx/key.pub" ./guest/build.sh --force 2>&1); rc=$?
   if [[ $rc -ne 0 && "$out" == *overlay* && ! -e "$T/v3/factory.qcow2.building" ]]; then pass "factory --force refused while an overlay exists"; else fail "factory --force with overlay (rc=$rc)"; fi
 else
   echo "SKIP  factory --force probe (no runtime staged)"
@@ -62,6 +66,18 @@ KDEVM_STATE="$T/v4" ./kdevm.sh status >/dev/null 2>&1
 if kill -0 $SL 2>/dev/null; then pass "stale pid: unrelated process left alive"; else fail "stale pid: unrelated process was signalled"; fi
 [[ ! -e "$T/v4/qemu.pid" ]] && pass "stale qemu.pid removed" || fail "stale qemu.pid kept"
 kill $SL 2>/dev/null; wait $SL 2>/dev/null
+# 4b. a bridge pid whose process merely mentions kdevm (an editor) must not be signalled
+mkdir -p "$T/v4b"; ARGV0="vim /review/kdevm.sh" zsh -c 'sleep 120; :' & ED=$!; sleep 0.3
+echo "$ED $(ps -o lstart= -p $ED | awk '{$1=$1; print}')" > "$T/v4b/clipboard-bridge.pid"
+KDEVM_STATE="$T/v4b" ./kdevm.sh down >/dev/null 2>&1
+if kill -0 $ED 2>/dev/null; then pass "bridge pid: unrelated 'vim kdevm.sh' process left alive"; else fail "bridge pid: unrelated process was signalled"; fi
+kill $ED 2>/dev/null; wait $ED 2>/dev/null
+# 4c. the real supervisor identity IS accepted (same argv[0] shape, same start time)
+mkdir -p "$T/v4c"; ARGV0="kdevm-bridge-supervisor 1" zsh -c 'sleep 120; :' & SV=$!; sleep 0.3
+echo "$SV $(ps -o lstart= -p $SV | awk '{$1=$1; print}')" > "$T/v4c/clipboard-bridge.pid"
+KDEVM_STATE="$T/v4c" ./kdevm.sh down >/dev/null 2>&1
+if kill -0 $SV 2>/dev/null; then fail "bridge pid: a genuine supervisor was not signalled"; else pass "bridge pid: genuine supervisor identity accepted and stopped"; fi
+kill $SV 2>/dev/null; wait $SV 2>/dev/null
 
 # 5. lock (finding 5): live holder blocks, dead holder is reclaimed, lock released after
 mkdir -p "$T/v5/lock"; sleep 120 & H=$!; echo $H > "$T/v5/lock/pid"
@@ -72,6 +88,23 @@ echo 999999 > "$T/v5/lock/pid"
 KDEVM_STATE="$T/v5" ./kdevm.sh down >/dev/null 2>&1; rc=$?
 [[ $rc -eq 0 && ! -d "$T/v5/lock" ]] && pass "dead lock holder reclaimed and lock released" || fail "dead lock reclaim (rc=$rc)"
 
+# 5b. the lock must cover the whole operation and overlapping commands must serialise
+mkdir -p "$T/v5b"
+KDEVM_STATE="$T/v5b" ./kdevm.sh _lockprobe 3 > "$T/v5b/a.out" 2>&1 &
+A=$!; sleep 0.5
+[[ -d "$T/v5b/lock" ]] && pass "lock exists during the held section (script-scope trap)" || fail "lock already gone during the held section"
+KDEVM_STATE="$T/v5b" ./kdevm.sh _lockprobe 3 > "$T/v5b/b.out" 2>&1; rcB=$?
+wait $A; rcA=$?
+if [[ $rcA -eq 0 && $rcB -ne 0 && "$(cat "$T/v5b/a.out")" == held && "$(cat "$T/v5b/b.out")" == *"another kdevm command"* ]]; then pass "overlapping commands: exactly one held the lock, the other was refused"; else fail "overlapping commands (A=$rcA B=$rcB)"; fi
+[[ ! -d "$T/v5b/lock" ]] && pass "lock released after the holder exited" || fail "lock left behind after exit"
+# 5c. exclusive stale-lock takeover: two contenders against one dead holder
+mkdir -p "$T/v5c/lock"; echo 999999 > "$T/v5c/lock/pid"
+KDEVM_STATE="$T/v5c" ./kdevm.sh _lockprobe 2 > "$T/v5c/a.out" 2>&1 & A=$!
+KDEVM_STATE="$T/v5c" ./kdevm.sh _lockprobe 2 > "$T/v5c/b.out" 2>&1 & B=$!
+wait $A; rcA=$?; wait $B; rcB=$?
+n=$(cat "$T/v5c/a.out" "$T/v5c/b.out" | grep -c '^held$')
+[[ $n -eq 1 ]] && pass "stale lock taken over by exactly one of two contenders" || fail "stale lock takeover: $n holders (A=$rcA B=$rcB)"
+
 # 6. private permissions (finding 6): the state dir a command creates is 0700
 [[ "$(stat -f %Lp "$T/v5")" == 700 || "$(stat -f %Lp "$T/v4")" == 700 ]] && pass "state directory created 0700" || fail "state directory mode"
 
@@ -79,17 +112,23 @@ KDEVM_STATE="$T/v5" ./kdevm.sh down >/dev/null 2>&1; rc=$?
 if [[ -x .venv/bin/python ]] && .venv/bin/python -c 'import yaml' 2>/dev/null; then
   awk "/<<'PY'\$/{f=1; next} f && /^PY\$/{exit} f" guest/build.sh > "$T/render.py"
   V=guest/vendor; ok=1
-  for pw in '&secret' '|secret' 'abc #secret' '12345678' 'q"uo\te' "it's" '{a: b}' '- dash' 'tab	here' ' leading space' 'üñî©ødé' '\\backslash' 'a\nb'; do
+  for pw in '&secret' '|secret' 'abc #secret' '12345678' 'q"uo\te' "it's" '{a: b}' '- dash' 'tab	here' ' leading space' 'üñî©ødé' '\\backslash' 'a\nb' 'pass🔑word'; do
     KDEVM_USER_NAME=tester KDEVM_PASS="$pw" KDEVM_SSHKEY='ssh-ed25519 AAAATEST comment #with: odd & chars' \
       python3 "$T/render.py" guest/user-data.yaml.tmpl "$T/ud.yaml" "$V/omarchy-native-clipboard-bridge" \
       "$V/omarchy-native-clipboard-bridge.service" "$V/92-omarchy-native-clipboard.rules" \
       "$V/90-try-omarchy-quantum.conf" guest/files/firefox-policies.json || { ok=0; continue; }
     KDEVM_PASS="$pw" .venv/bin/python -c 'import yaml,os,sys; d=yaml.safe_load(open(sys.argv[1])); u=d["users"][0]; sys.exit(0 if u["plain_text_passwd"]==os.environ["KDEVM_PASS"] and u["ssh_authorized_keys"][0]=="ssh-ed25519 AAAATEST comment #with: odd & chars" else 1)' "$T/ud.yaml" || { ok=0; echo "      password case failed: ${(q)pw}"; }
   done
-  [[ $ok -eq 1 ]] && pass "13 hostile passwords and a hostile key round-trip through YAML" || fail "YAML rendering"
+  [[ $ok -eq 1 ]] && pass "14 hostile passwords (incl. non-BMP) and a hostile key round-trip through YAML" || fail "YAML rendering"
 else
   echo "SKIP  YAML rendering (no .venv with PyYAML; see header)"
 fi
+
+# 8. config loader: any NAME=value is read, an explicit (even empty) variable wins
+mkdir -p "$T/home/.config/kdevm"; printf 'QEMU_IMG=/custom/qemu-img\nKDEVM_USER=fromfile\nKDEVM_MEM_MB=1234\n' > "$T/home/.config/kdevm/env"
+sed -n '/^kdevm_load_env() {/,/^kdevm_load_env$/p' kdevm.sh > "$T/loader.zsh"
+got=$(HOME="$T/home" KDEVM_USER= zsh -c "source $T/loader.zsh; print -r -- \"\${QEMU_IMG}|\${KDEVM_USER-unset}|\${KDEVM_MEM_MB}\"")
+[[ "$got" == "/custom/qemu-img||1234" ]] && pass "config loader: non-KDEVM keys kept, explicit empty value respected" || fail "config loader ($got)"
 
 echo
 [[ $fails -eq 0 ]] && { echo "all checks passed"; exit 0; } || { echo "$fails check(s) failed"; exit 1; }

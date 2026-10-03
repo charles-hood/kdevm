@@ -81,6 +81,29 @@ Found while validating: the config file `~/.config/kdevm/env` was sourced
 after the environment and overrode explicit variables. It is now read line
 by line and only fills variables that are unset.
 
+### Second pass (Codex, commit b650ac3): 4 fixed, 2 partial, 1 not fixed, 3 new
+
+| item | what was wrong | fix | validated by |
+|---|---|---|---|
+| 5 lock | the EXIT trap was set inside `take_lock()`; zsh runs a function-scoped trap when the function returns, so the lock vanished before the operation; stale takeover was not exclusive | script-scope `trap kdevm_exit EXIT`; dead holder taken over by `mv` (only one contender's rename succeeds); guest/build.sh takes the lock before its guards | `_lockprobe` verb: lock present during the hold, two overlapping probes serialise, two contenders against a dead holder produce exactly one holder |
+| 4 bridge pid | any process whose command mentioned "kdevm" was accepted | supervisor is its own zsh process named via `ARGV0="kdevm-bridge-supervisor <qemu pid>"`; both pid files store "pid start-time"; a pid counts only with the right command shape AND the recorded start time | an `ARGV0="vim /review/kdevm.sh"` sleeper survives `down`; a genuine supervisor identity is stopped |
+| 7 non-BMP | `json.dumps` emitted `\ud83d\udd11` surrogates, which PyYAML returns as two surrogate chars | `ensure_ascii=False` (raw UTF-8 is valid in a YAML double-quoted scalar) | `pass🔑word` round-trips |
+| config loader | only `KDEVM_*` keys read; an explicit empty variable treated as unset | any `NAME=value` line; `${(P)k+set}` distinguishes set from empty | loader probe: `QEMU_IMG` kept, `KDEVM_USER=` kept empty |
+| test isolation | builder probes could touch the real password file; `py_compile` wrote a `.pyc` into the tree (and it was committed) | fixtures for password and key on every builder call; compile in memory; `.pyc` untracked and ignored | tree clean after a run |
+| cleanup under set -e | a failed `kill` in the trap aborted the rest of it | one `cleanup()` with `set +e`, every step non-fatal | reviewed; same function covers success and failure |
+
+Found while validating, by breaking it live: `ps -o lstart=` pads with
+trailing spaces, so the first start-time comparison failed, `status`
+disowned the running QEMU, `down` did nothing, and a second `up` launched
+another QEMU on the same overlay. QEMU's own image lock refused it ("Failed
+to get write lock"), so nothing was corrupted, but `up` still reported
+success because the sockets appear before the disk is opened. Three fixes:
+whitespace is collapsed on both sides of the comparison; `up` requires the
+process alive and QMP answering after the socket wait; `up` refuses to
+start when any untracked QEMU holds the overlay. Then: `down` (ssh path,
+since the first QEMU's QMP socket had been unlinked), supervisor gone,
+`up`, QMP answering, a duplicate `up` refused, one QEMU process.
+
 ## Rules that are easy to forget
 
 - `gic-version=3` is mandatory under HVF on this QEMU; it rejects GICv2.

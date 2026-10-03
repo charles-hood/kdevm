@@ -24,7 +24,15 @@ before tagging:
 - plus one found while validating: values in `~/.config/kdevm/env` are
   defaults and an explicit environment variable now wins.
 
-`tests/checks.sh` keeps the review's probes runnable offline.
+A second review pass found the lock trap was function-scoped in zsh (so it
+protected nothing), the supervisor identity check too loose, surrogate
+pairs in the YAML for non-BMP passwords, a config loader that dropped
+non-KDEVM keys, tests that could touch real files, and cleanup that a
+failed `kill` could abort. All fixed; while validating, `up` gained two
+more guards (process alive and QMP answering after the socket wait, no
+start beside an untracked QEMU on the overlay).
+
+`tests/checks.sh` keeps every probe from both passes runnable offline.
 
 - Runtime: try-omarchy's patched QEMU 11.1.1 (HVF, Cocoa + VirGL, libslirp,
   SDL duplex audio, virtio-9p) built by their own script from a pinned
