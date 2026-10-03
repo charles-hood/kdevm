@@ -9,16 +9,8 @@
 set -uo pipefail
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO"
-# same config loader as the scripts: explicit environment wins over the file
-kdevm_load_env() {
-  local f="$HOME/.config/kdevm/env" line k v; [[ -f "$f" ]] || return 0
-  while IFS= read -r line || [[ -n "$line" ]]; do
-    [[ "$line" =~ '^[[:space:]]*(export[[:space:]]+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$' ]] || continue
-    k="${match[2]}"; v="${match[3]}"
-    [[ -n "${(P)k+set}" ]] && continue
-    eval "export $k=$v"
-  done < "$f"
-}
+KDEVM_TOOL=tests
+source "$REPO/lib/kdevm-common.zsh"
 kdevm_load_env
 T="$(mktemp -d "${TMPDIR:-/tmp}/kdevm-checks.XXXXXX")"
 trap 'rm -rf "$T"' EXIT
@@ -32,7 +24,7 @@ fail() { echo "FAIL  $1"; fails=$((fails + 1)); }
 need_runtime() { [[ -x "${KDEVM_RUNTIME_ROOT:-${XDG_DATA_HOME:-$HOME/.local/share}/kdevm/runtime}/current/bin/qemu-system-aarch64" ]]; }
 
 # 0. syntax
-for f in kdevm.sh guest/build.sh runtime/build.sh tests/checks.sh; do
+for f in kdevm.sh guest/build.sh runtime/build.sh lib/kdevm-common.zsh tests/checks.sh; do
   zsh -n "$f" && pass "zsh -n $f" || fail "zsh -n $f"
 done
 python3 -c 'compile(open("guest/vendor/omarchy-native-clipboard-bridge").read(), "agent", "exec")' 2>/dev/null && pass "vendored clipboard agent compiles (in memory, no bytecode written)" || fail "vendored clipboard agent compiles"
@@ -79,6 +71,22 @@ KDEVM_STATE="$T/v4c" ./kdevm.sh down >/dev/null 2>&1
 if kill -0 $SV 2>/dev/null; then fail "bridge pid: a genuine supervisor was not signalled"; else pass "bridge pid: genuine supervisor identity accepted and stopped"; fi
 kill $SV 2>/dev/null; wait $SV 2>/dev/null
 
+
+# 4d. a record without a start time is never ours: sleeper survives, record dropped
+mkdir -p "$T/v4d"; sleep 120 & SL2=$!; echo "$SL2" > "$T/v4d/qemu.pid"
+KDEVM_STATE="$T/v4d" ./kdevm.sh down >/dev/null 2>&1
+kill -0 $SL2 2>/dev/null && pass "pid record without start time: process left alive" || fail "pid record without start time: signalled"
+[[ ! -e "$T/v4d/qemu.pid" ]] && pass "pid record without start time discarded" || fail "pid record without start time kept"
+kill $SL2 2>/dev/null; wait $SL2 2>/dev/null
+# 4e. inspection failure (ps broken) keeps the record, refuses the verb, signals nothing
+mkdir -p "$T/v4e" "$T/fakebin"; printf '#!/bin/sh\nexit 1\n' > "$T/fakebin/ps"; chmod +x "$T/fakebin/ps"
+sleep 120 & SL3=$!; echo "$SL3 $(ps -o lstart= -p $SL3 | awk '{$1=$1; print}')" > "$T/v4e/qemu.pid"
+out=$(PATH="$T/fakebin:$PATH" KDEVM_STATE="$T/v4e" ./kdevm.sh down 2>&1); rc=$?
+if [[ $rc -ne 0 && "$out" == *"cannot be inspected"* && -e "$T/v4e/qemu.pid" ]] && kill -0 $SL3 2>/dev/null; then pass "inspection failure: record kept, verb refused, process untouched"; else fail "inspection failure handling (rc=$rc)"; fi
+out=$(PATH="$T/fakebin:$PATH" KDEVM_STATE="$T/v4e" ./kdevm.sh status 2>&1)
+[[ "$out" == *UNKNOWN* ]] && pass "status reports UNKNOWN when inspection fails" || fail "status on inspection failure"
+kill $SL3 2>/dev/null; wait $SL3 2>/dev/null
+
 # 5. lock (finding 5): live holder blocks, dead holder is reclaimed, lock released after
 mkdir -p "$T/v5/lock"; sleep 120 & H=$!; echo $H > "$T/v5/lock/pid"
 out=$(KDEVM_STATE="$T/v5" ./kdevm.sh down 2>&1); rc=$?
@@ -105,6 +113,21 @@ wait $A; rcA=$?; wait $B; rcB=$?
 n=$(cat "$T/v5c/a.out" "$T/v5c/b.out" | grep -c '^held$')
 [[ $n -eq 1 ]] && pass "stale lock taken over by exactly one of two contenders" || fail "stale lock takeover: $n holders (A=$rcA B=$rcB)"
 
+# 5d. an abandoned takeover marker (dead contender) does not wedge the lock forever
+mkdir -p "$T/v5d/lock/takeover"; echo 999999 > "$T/v5d/lock/pid"; touch -t 202001010000 "$T/v5d/lock/takeover"
+out=$(KDEVM_STATE="$T/v5d" ./kdevm.sh _lockprobe 0 2>&1); rc=$?
+[[ $rc -eq 0 && "$out" == held ]] && pass "stale lock with an abandoned takeover marker recovered" || fail "abandoned marker (rc=$rc: $out)"
+# 5e. a fresh marker inside a LIVE owner's lock must not let a contender steal it
+mkdir -p "$T/v5e/lock/takeover"; sleep 120 & LH=$!; echo $LH > "$T/v5e/lock/pid"
+out=$(KDEVM_STATE="$T/v5e" ./kdevm.sh _lockprobe 0 2>&1); rc=$?
+[[ $rc -ne 0 && -d "$T/v5e/lock" && "$(cat "$T/v5e/lock/pid")" == "$LH" ]] && pass "live owner's lock not stolen despite a takeover marker" || fail "live owner stolen (rc=$rc)"
+kill $LH 2>/dev/null; wait $LH 2>/dev/null
+# 5f. a lock-refused factory build must not touch the active build's seed
+mkdir -p "$T/v5f/lock"; sleep 120 & LH2=$!; echo $LH2 > "$T/v5f/lock/pid"; printf 'seed' > "$T/v5f/seed.iso"
+out=$(KDEVM_STATE="$T/v5f" ./guest/build.sh 2>&1); rc=$?
+[[ $rc -ne 0 && -f "$T/v5f/seed.iso" ]] && pass "refused builder left the active build's seed alone" || fail "refused builder removed the seed (rc=$rc)"
+kill $LH2 2>/dev/null; wait $LH2 2>/dev/null
+
 # 6. private permissions (finding 6): the state dir a command creates is 0700
 [[ "$(stat -f %Lp "$T/v5")" == 700 || "$(stat -f %Lp "$T/v4")" == 700 ]] && pass "state directory created 0700" || fail "state directory mode"
 
@@ -126,9 +149,73 @@ fi
 
 # 8. config loader: any NAME=value is read, an explicit (even empty) variable wins
 mkdir -p "$T/home/.config/kdevm"; printf 'QEMU_IMG=/custom/qemu-img\nKDEVM_USER=fromfile\nKDEVM_MEM_MB=1234\n' > "$T/home/.config/kdevm/env"
-sed -n '/^kdevm_load_env() {/,/^kdevm_load_env$/p' kdevm.sh > "$T/loader.zsh"
-got=$(HOME="$T/home" KDEVM_USER= zsh -c "source $T/loader.zsh; print -r -- \"\${QEMU_IMG}|\${KDEVM_USER-unset}|\${KDEVM_MEM_MB}\"")
+got=$(HOME="$T/home" KDEVM_USER= zsh -c "source $REPO/lib/kdevm-common.zsh; kdevm_load_env; print -r -- \"\${QEMU_IMG}|\${KDEVM_USER-unset}|\${KDEVM_MEM_MB}\"")
 [[ "$got" == "/custom/qemu-img||1234" ]] && pass "config loader: non-KDEVM keys kept, explicit empty value respected" || fail "config loader ($got)"
+
+
+# 9. QMP helper strictness: success only on a "return"; EOF and error replies fail
+qmp_server() { # socket mode(close|error|ok)
+  python3 - "$1" "$2" <<'PYQ' &
+import json, os, socket, sys
+path, mode = sys.argv[1], sys.argv[2]
+try: os.unlink(path)
+except FileNotFoundError: pass
+srv = socket.socket(socket.AF_UNIX); srv.bind(path); srv.listen(1); srv.settimeout(10)
+c, _ = srv.accept(); f = c.makefile("rw")
+f.write(json.dumps({"QMP": {"version": {}, "capabilities": []}}) + "\n"); f.flush()
+f.readline(); f.write(json.dumps({"return": {}}) + "\n"); f.flush()
+cmd = json.loads(f.readline())
+if mode == "close": c.close(); sys.exit(0)
+if mode == "error": f.write(json.dumps({"error": {"class": "GenericError", "desc": "nope"}}) + "\n"); f.flush()
+if mode == "ok": f.write(json.dumps({"return": {"status": "running", "running": True}}) + "\n"); f.flush()
+c.close()
+PYQ
+  sleep 0.3
+}
+for mode in close error ok; do
+  QMP="$T/qmp-$mode.sock"; qmp_server "$QMP" "$mode"; SV=$!
+  out=$(qmp query-status 2>/dev/null); rc=$?; wait $SV 2>/dev/null
+  case $mode in
+    ok)    [[ $rc -eq 0 && "$out" == *'"running": true'* ]] && pass "qmp: success on a proper reply" || fail "qmp ok (rc=$rc)" ;;
+    close) [[ $rc -ne 0 ]] && pass "qmp: EOF without a reply fails" || fail "qmp EOF accepted" ;;
+    error) [[ $rc -ne 0 ]] && pass "qmp: error reply fails" || fail "qmp error accepted" ;;
+  esac
+done
+
+# 10. failed readiness: a fake QEMU that opens its sockets but never answers QMP
+#     is terminated by up, which exits non-zero and leaves no pid file.
+QI="${QEMU_IMG:-/opt/homebrew/bin/qemu-img}"
+if [[ -x "$QI" ]]; then
+  FRT="$T/fakert/current"; mkdir -p "$FRT/bin" "$T/v10"
+  cat > "$FRT/bin/qemu-system-aarch64" <<'EOF'
+#!/bin/zsh
+# fake QEMU: bind the QMP and clipboard sockets named on the command line, then hang
+qmp=""; clip=""
+for a in "$@"; do
+  [[ "$a" == unix:*,server=on,wait=off ]] && { qmp="${a#unix:}"; qmp="${qmp%%,*}"; }
+  [[ "$a" == socket,id=clip,path=* ]] && { clip="${a#socket,id=clip,path=}"; clip="${clip%%,*}"; }
+done
+python3 - "$qmp" "$clip" <<'PYF'
+import socket, sys, time, os
+ss = []
+for p in sys.argv[1:]:
+    if not p: continue
+    try: os.unlink(p)
+    except FileNotFoundError: pass
+    s = socket.socket(socket.AF_UNIX); s.bind(p); s.listen(1); ss.append(s)
+time.sleep(120)
+PYF
+EOF
+  chmod +x "$FRT/bin/qemu-system-aarch64"
+  printf '#!/bin/sh\necho 48000\n' > "$FRT/bin/omarchy-vm-helper"; chmod +x "$FRT/bin/omarchy-vm-helper"
+  "$QI" create -q -f qcow2 "$T/v10/factory.qcow2" 1M
+  : > "$T/v10/code.fd"; : > "$T/v10/vars.fd"
+  out=$(KDEVM_STATE="$T/v10" KDEVM_RUNTIME_ROOT="$T/fakert" KDEVM_FW_CODE="$T/v10/code.fd" KDEVM_FW_VARS="$T/v10/vars.fd" KDEVM_SHARE="$T/v10/share" KDEVM_WINDOW=keep ./kdevm.sh up 2>&1); rc=$?
+  left=$(pgrep -f "$FRT/bin/qemu-system-aarch64" || true)
+  if [[ $rc -ne 0 && -z "$left" && ! -e "$T/v10/qemu.pid" && "$out" == *"failed to start"* ]]; then pass "failed readiness: fake QEMU terminated, non-zero exit, no pid file"; else fail "failed readiness (rc=$rc, leftover='$left')"; [[ -n "$left" ]] && kill $left 2>/dev/null; fi
+else
+  echo "SKIP  failed-readiness probe (no qemu-img)"
+fi
 
 echo
 [[ $fails -eq 0 ]] && { echo "all checks passed"; exit 0; } || { echo "$fails check(s) failed"; exit 1; }

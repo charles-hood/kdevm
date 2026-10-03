@@ -15,18 +15,8 @@ set -euo pipefail
 umask 077   # disks, seed (holds the plaintext password), vars: owner-only from creation
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-# ~/.config/kdevm/env holds defaults; a variable already set in the
-# environment (even to the empty string) wins. Any NAME=value line is read
-# (KDEVM_*, QEMU_IMG, ...); values may reference $HOME.
-kdevm_load_env() {
-  local f="$HOME/.config/kdevm/env" line k v; [[ -f "$f" ]] || return 0
-  while IFS= read -r line || [[ -n "$line" ]]; do
-    [[ "$line" =~ '^[[:space:]]*(export[[:space:]]+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$' ]] || continue
-    k="${match[2]}"; v="${match[3]}"
-    [[ -n "${(P)k+set}" ]] && continue
-    eval "export $k=$v"
-  done < "$f"
-}
+KDEVM_TOOL=guest/build.sh
+source "$REPO/lib/kdevm-common.zsh"
 kdevm_load_env
 STATE="${KDEVM_STATE:-$HOME/.cache/kdevm}"
 RT="${KDEVM_RUNTIME_ROOT:-${XDG_DATA_HOME:-$HOME/.local/share}/kdevm/runtime}/current"
@@ -52,7 +42,6 @@ KNOWN_HOSTS="$STATE/known_hosts"
 SSH_OPTS=(-p "$SSH_PORT" -o UserKnownHostsFile="$KNOWN_HOSTS" -o StrictHostKeyChecking=no
           -o LogLevel=ERROR -o ConnectTimeout=5 -o BatchMode=yes)
 
-die() { echo "guest/build.sh: $*" >&2; exit 1; }
 log() { echo "== $(date +%H:%M:%S) $*"; }
 
 [[ -x "$QEMU" ]] || die "runtime missing at $RT; run runtime/build.sh first"
@@ -72,48 +61,29 @@ fi
 chmod 600 "$PASS_FILE" 2>/dev/null || true
 [[ -n "$SSH_PUB" && -f "$SSH_PUB" ]] || die "no ssh public key found; set KDEVM_SSH_PUB or run ssh-keygen -t ed25519"
 install -d -m 700 "$STATE"; chmod 700 "$STATE"
-# One lock per state directory shared with kdevm.sh, which sets
-# KDEVM_LOCKED=1 when it already holds it. mkdir is atomic. A lock
-# whose recorded holder is dead is taken over EXCLUSIVELY: contenders race
-# to rename it away, only one rename succeeds, and the loser's next mkdir
-# finds the winner's fresh lock. Released by the script-scope EXIT trap
-# (a trap set inside a function would fire when the function returns).
 LOCK="$STATE/lock"
-take_lock() {
-  local attempt holder
-  install -d -m 700 "$STATE"
-  for attempt in 1 2 3 4 5; do
-    if mkdir "$LOCK" 2>/dev/null; then
-      echo $$ > "$LOCK/pid"; KDEVM_LOCK_HELD=1; export KDEVM_LOCKED=1; return 0
-    fi
-    holder=$(cat "$LOCK/pid" 2>/dev/null || echo 0)
-    if [[ "$holder" =~ ^[1-9][0-9]*$ ]] && kill -0 "$holder" 2>/dev/null; then
-      die "another kdevm command is running (pid $holder); wait for it"
-    fi
-    mv "$LOCK" "$LOCK.stale.$$" 2>/dev/null && rm -rf "$LOCK.stale.$$"
-    sleep 0.2
-  done
-  die "cannot take the lock $LOCK"
-}
-kdevm_exit() { [[ -n "${KDEVM_LOCK_HELD:-}" ]] && rm -rf "$LOCK"; return 0; }
-trap kdevm_exit EXIT
-# Everything that can fail or be interrupted after this point is undone by
-# cleanup(): kill the provisioning VM, keep a half-built disk as
-# factory.qcow2.failed (owner-only), remove the seed (plaintext password)
-# and the vars copy, release the lock. Each step is non-fatal so one failing
-# step (an already-exited QEMU) cannot skip the rest.
-QPID=""; WORK=""; PROV_VARS=""; SEED_DIR=""
+# cleanup() undoes everything this invocation did after it OWNED the build:
+# kill the provisioning VM, keep a half-built disk as factory.qcow2.failed
+# (owner-only), remove the seed (plaintext password) and the vars copy,
+# release the lock if this process took it. Each step is non-fatal so one
+# failing step (an already-exited QEMU) cannot skip the rest. Before
+# ownership (a refused lock) it touches nothing: those files belong to the
+# build that holds the lock.
+QPID=""; WORK=""; PROV_VARS=""; SEED_DIR=""; OWNED=0
 cleanup() {
   set +e
-  [[ -n "$QPID" ]] && kill "$QPID" 2>/dev/null
-  [[ -n "$WORK" && -f "$WORK" ]] && mv -f "$WORK" "$FACTORY.failed" 2>/dev/null
-  rm -f "$PROV_VARS" "$STATE/seed.iso" 2>/dev/null
-  [[ -n "$SEED_DIR" ]] && rm -rf "$SEED_DIR"
-  [[ -n "${KDEVM_LOCK_HELD:-}" ]] && rm -rf "$LOCK"
+  if [[ $OWNED -eq 1 ]]; then
+    [[ -n "$QPID" ]] && kill "$QPID" 2>/dev/null
+    [[ -n "$WORK" && -f "$WORK" ]] && mv -f "$WORK" "$FACTORY.failed" 2>/dev/null
+    rm -f "$PROV_VARS" "$STATE/seed.iso" 2>/dev/null
+    [[ -n "$SEED_DIR" ]] && rm -rf "$SEED_DIR"
+  fi
+  release_lock
   return 0
 }
 trap cleanup EXIT
 [[ "${KDEVM_LOCKED:-}" == 1 ]] || take_lock
+OWNED=1
 
 # Guards, under the lock (a concurrent command cannot change the answer).
 if [[ -f "$FACTORY" && "${1:-}" != --force ]]; then

@@ -113,7 +113,7 @@ every script):
 
 | | |
 |---|---|
-| the repo | scripts, cloud-init template, vendored guest agents, docs. Nothing large, nothing secret. |
+| the repo | `kdevm.sh`, `lib/kdevm-common.zsh` (lock, process identity, QMP, config), the build scripts, the cloud-init template, vendored guest agents, `tests/checks.sh`, docs. Nothing large, nothing secret. |
 | `$KDEVM_RUNTIME_ROOT/<pin>/` | built QEMU + helper, `provenance.txt`, `current` symlink. Slow to rebuild, keep it. |
 | `$KDEVM_STATE/` | base image, `factory.qcow2`, `work.qcow2`, `efivars.fd`, `run/` sockets, logs. Disposable. |
 | `$KDEVM_SHARE/` | the one shared folder. An exchange folder, not a build tree. |

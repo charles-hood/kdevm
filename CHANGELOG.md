@@ -32,7 +32,16 @@ failed `kill` could abort. All fixed; while validating, `up` gained two
 more guards (process alive and QMP answering after the socket wait, no
 start beside an untracked QEMU on the overlay).
 
-`tests/checks.sh` keeps every probe from both passes runnable offline.
+A third pass closed the remaining lifecycle gaps: the lock is now one
+atomic rename of a pid-bearing directory with takeover serialised by a
+marker, process identity is tri-state (running, unknown, absent) with a
+mandatory start time and refuses to act on what it cannot inspect, the QMP
+helper fails on EOF and error replies, a QEMU that never becomes ready is
+terminated before its identity is dropped, and a build that was refused the
+lock touches nothing. The shared logic lives in `lib/kdevm-common.zsh`.
+
+`tests/checks.sh` keeps every probe from all three passes runnable offline
+(29 checks, including fake `ps`, fake QMP servers and a fake QEMU).
 
 - Runtime: try-omarchy's patched QEMU 11.1.1 (HVF, Cocoa + VirGL, libslirp,
   SDL duplex audio, virtio-9p) built by their own script from a pinned

@@ -18,18 +18,8 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-# ~/.config/kdevm/env holds defaults; a variable already set in the
-# environment (even to the empty string) wins. Any NAME=value line is read
-# (KDEVM_*, QEMU_IMG, ...); values may reference $HOME.
-kdevm_load_env() {
-  local f="$HOME/.config/kdevm/env" line k v; [[ -f "$f" ]] || return 0
-  while IFS= read -r line || [[ -n "$line" ]]; do
-    [[ "$line" =~ '^[[:space:]]*(export[[:space:]]+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$' ]] || continue
-    k="${match[2]}"; v="${match[3]}"
-    [[ -n "${(P)k+set}" ]] && continue
-    eval "export $k=$v"
-  done < "$f"
-}
+KDEVM_TOOL=runtime/build.sh
+source "$REPO/lib/kdevm-common.zsh"
 kdevm_load_env
 PIN="$(tr -d '[:space:]' < "$REPO/runtime/pin.txt")"
 SCRATCH="${KDEVM_SCRATCH:-${KDEVM_STATE:-$HOME/.cache/kdevm}/build}"

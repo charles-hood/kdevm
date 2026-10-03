@@ -26,18 +26,8 @@ set -euo pipefail
 umask 077   # overlay, vars store, sockets, logs: owner-only from creation
 
 REPO="$(cd "$(dirname "$0")" && pwd)"
-# ~/.config/kdevm/env holds defaults; a variable already set in the
-# environment (even to the empty string) wins. Any NAME=value line is read
-# (KDEVM_*, QEMU_IMG, ...); values may reference $HOME.
-kdevm_load_env() {
-  local f="$HOME/.config/kdevm/env" line k v; [[ -f "$f" ]] || return 0
-  while IFS= read -r line || [[ -n "$line" ]]; do
-    [[ "$line" =~ '^[[:space:]]*(export[[:space:]]+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$' ]] || continue
-    k="${match[2]}"; v="${match[3]}"
-    [[ -n "${(P)k+set}" ]] && continue
-    eval "export $k=$v"
-  done < "$f"
-}
+KDEVM_TOOL=kdevm
+source "$REPO/lib/kdevm-common.zsh"
 kdevm_load_env
 STATE="${KDEVM_STATE:-$HOME/.cache/kdevm}"
 RT="${KDEVM_RUNTIME_ROOT:-${XDG_DATA_HOME:-$HOME/.local/share}/kdevm/runtime}/current"
@@ -63,81 +53,34 @@ SERIAL="$STATE/serial.log"
 PIDFILE="$STATE/qemu.pid"
 BRIDGEPID="$STATE/clipboard-bridge.pid"
 KNOWN_HOSTS="$STATE/known_hosts"
+LOCK="$STATE/lock"
 SSH_OPTS=(-p "$SSH_PORT" -o UserKnownHostsFile="$KNOWN_HOSTS" -o StrictHostKeyChecking=no
           -o LogLevel=ERROR -o ConnectTimeout=5)
+trap release_lock EXIT           # script scope: covers the whole command
 
-die() { echo "kdevm: $*" >&2; exit 1; }
-log() { echo "== $*"; }
-
-# Pid files hold "pid start-time". A saved pid counts only if that pid is
-# alive, started at the recorded time (so a reused number never matches),
-# and shows the expected command line: for QEMU, our binary on our overlay;
-# for the clipboard supervisor, the argv[0] it is launched with.
-# ps pads lstart with spaces; awk collapses all whitespace so the saved and
-# the live value compare equal.
-proc_start() { ps -o lstart= -p "$1" 2>/dev/null | awk '{$1=$1; print}'; }
-read_pidfile() {
-  local f=$1 line; [[ -f "$f" ]] || return 1
-  line=$(head -1 "$f" | awk '{$1=$1; print}'); PF_PID="${line%% *}"; PF_START="${line#* }"
-  [[ "$PF_PID" == "$line" ]] && PF_START=""
-  [[ "$PF_PID" =~ ^[1-9][0-9]*$ ]]
-}
-pid_matches() { # pid start-time command-pattern (zsh glob)
-  local pid=$1 start=$2 pat=$3 cmd
-  cmd=$(ps -o command= -p "$pid" 2>/dev/null) || return 1
-  [[ -n "$cmd" && "$cmd" == ${~pat} ]] || return 1
-  [[ -z "$start" || "$(proc_start "$pid")" == "$start" ]]
-}
+QEMU_PATTERN="*${QEMU}*file=${WORK}*"
+BRIDGE_PATTERN="kdevm-bridge-supervisor *"
+# qemu_state -> running | unknown | absent (see pid_state in the library).
+# An absent record is discarded; an unknown one is KEPT so a later command
+# cannot mistake "could not inspect" for "gone".
+qemu_state() { local PF_PID PF_START; read_pidfile "$PIDFILE" || { echo absent; return 0; }; pid_state "$PF_PID" "$PF_START" "$QEMU_PATTERN"; }
 qemu_pid() {
-  local PF_PID PF_START
-  if read_pidfile "$PIDFILE" && pid_matches "$PF_PID" "$PF_START" "*${QEMU}*file=${WORK}*"; then echo "$PF_PID"; else rm -f "$PIDFILE"; fi
+  local PF_PID PF_START st; read_pidfile "$PIDFILE" || return 0
+  st=$(pid_state "$PF_PID" "$PF_START" "$QEMU_PATTERN")
+  case $st in running) echo "$PF_PID" ;; absent) rm -f "$PIDFILE" ;; esac
 }
-running() { [[ -n "$(qemu_pid)" ]]; }
+running() { [[ "$(qemu_state)" == running ]]; }
 bridge_pid() {
+  local PF_PID PF_START st; read_pidfile "$BRIDGEPID" || return 0
+  st=$(pid_state "$PF_PID" "$PF_START" "$BRIDGE_PATTERN")
+  case $st in running) echo "$PF_PID" ;; absent) rm -f "$BRIDGEPID" ;; esac
+}
+refuse_if_unknown() { # verb
   local PF_PID PF_START
-  if read_pidfile "$BRIDGEPID" && pid_matches "$PF_PID" "$PF_START" "kdevm-bridge-supervisor *"; then echo "$PF_PID"; else rm -f "$BRIDGEPID"; fi
-}
-
-# One lock per state directory for every state-changing verb; guest/build.sh
-# sees KDEVM_LOCKED=1 and does not take it again. mkdir is atomic. A lock
-# whose recorded holder is dead is taken over EXCLUSIVELY: contenders race
-# to rename it away, only one rename succeeds, and the loser's next mkdir
-# finds the winner's fresh lock. Released by the script-scope EXIT trap
-# (a trap set inside a function would fire when the function returns).
-LOCK="$STATE/lock"
-take_lock() {
-  local attempt holder
-  install -d -m 700 "$STATE"
-  for attempt in 1 2 3 4 5; do
-    if mkdir "$LOCK" 2>/dev/null; then
-      echo $$ > "$LOCK/pid"; KDEVM_LOCK_HELD=1; export KDEVM_LOCKED=1; return 0
-    fi
-    holder=$(cat "$LOCK/pid" 2>/dev/null || echo 0)
-    if [[ "$holder" =~ ^[1-9][0-9]*$ ]] && kill -0 "$holder" 2>/dev/null; then
-      die "another kdevm command is running (pid $holder); wait for it"
-    fi
-    mv "$LOCK" "$LOCK.stale.$$" 2>/dev/null && rm -rf "$LOCK.stale.$$"
-    sleep 0.2
-  done
-  die "cannot take the lock $LOCK"
-}
-kdevm_exit() { [[ -n "${KDEVM_LOCK_HELD:-}" ]] && rm -rf "$LOCK"; return 0; }
-trap kdevm_exit EXIT
-
-# QMP: one command, stdlib Python over the unix socket.
-qmp() {
-  python3 - "$QMP" "$1" <<'PY'
-import json, socket, sys
-s = socket.socket(socket.AF_UNIX); s.settimeout(5); s.connect(sys.argv[1])
-f = s.makefile("rw")
-f.readline()                                   # greeting
-f.write(json.dumps({"execute": "qmp_capabilities"}) + "\n"); f.flush(); f.readline()
-f.write(json.dumps({"execute": sys.argv[2]}) + "\n"); f.flush()
-for line in f:
-    d = json.loads(line)
-    if "return" in d or "error" in d:
-        print(json.dumps(d.get("return", d.get("error")))); break
-PY
+  if [[ "$(qemu_state)" == unknown ]]; then
+    read_pidfile "$PIDFILE"
+    die "pid $PF_PID is alive but cannot be inspected; refusing to $1 (check: ps -p $PF_PID; if it is not kdevm's QEMU, remove $PIDFILE)"
+  fi
 }
 
 # Main display pixel size "W H" (1920 1080 if unreadable). The initial
@@ -187,6 +130,7 @@ ensure_factory() { [[ -f "$FACTORY" ]] || { log "factory missing; building (abou
 
 up() {
   ensure_runtime; ensure_factory
+  refuse_if_unknown "start"
   if running; then log "already running (pid $(qemu_pid))"; return 0; fi
   install -d -m 700 "$STATE" "$RUN"; chmod 700 "$STATE"; mkdir -p "$SHARE"
   [[ -f "$WORK" ]] || { log "new overlay on the factory"; "$QEMU_IMG" create -q -f qcow2 -b "$FACTORY" -F qcow2 "$WORK"; }
@@ -232,18 +176,33 @@ up() {
     -fw_cfg "name=opt/kdevm/scale,string=$scale" \
     -qmp "unix:$QMP,server=on,wait=off" -serial "file:$SERIAL" -monitor none \
     >"$STATE/qemu.out" 2>&1 &
-  local pid=$!
-  echo "$pid $(proc_start $pid)" > "$PIDFILE"
+  local pid=$! start
+  start=$(proc_start $pid)
+  [[ -n "$start" ]] || { kill $pid 2>/dev/null || true; die "could not record QEMU's start time; aborted"; }
+  echo "$pid $start" > "$PIDFILE"
   for i in {1..100}; do [[ -S "$QMP" && -S "$CLIP" ]] && break; kill -0 $pid 2>/dev/null || break; sleep 0.1; done
   # The sockets appear before the disks are opened, so their existence proves
-  # nothing: the process must still be alive and QMP must answer.
-  local alive=0
+  # nothing: QEMU must report "running" over QMP (qmp() fails on EOF or an
+  # error reply) and still be alive afterwards. On failure, a child that is
+  # still alive is OUR child and is terminated before the identity is dropped.
+  local ready=0 st
   for i in {1..50}; do
     kill -0 $pid 2>/dev/null || break
-    qmp query-status >/dev/null 2>&1 && { alive=1; break; }
+    if st=$(qmp query-status 2>/dev/null) && [[ "$st" == *'"running": true'* ]]; then ready=1; break; fi
     sleep 0.2
   done
-  [[ $alive -eq 1 ]] || { rm -f "$PIDFILE"; cat "$STATE/qemu.out" >&2; die "QEMU exited at start (see above)"; }
+  kill -0 $pid 2>/dev/null || ready=0
+  if [[ $ready -ne 1 ]]; then
+    if kill -0 $pid 2>/dev/null; then
+      log "QEMU did not become ready; terminating pid $pid"
+      kill $pid 2>/dev/null || true
+      for i in {1..25}; do kill -0 $pid 2>/dev/null || break; sleep 0.2; done
+      kill -0 $pid 2>/dev/null && { kill -9 $pid 2>/dev/null || true; sleep 0.5; }
+    fi
+    rm -f "$PIDFILE" "$QMP" "$CLIP"
+    cat "$STATE/qemu.out" >&2
+    die "QEMU failed to start (see above)"
+  fi
   # Clipboard bridge: their helper, supervised while QEMU lives (as their
   # launcher does). The supervisor is its own zsh process with a distinctive
   # argv[0] (ARGV0) so bridge_pid() can recognise it, with stdio detached so
@@ -254,8 +213,8 @@ up() {
       "$helper" --bridge-native-clipboard "$qpid" "$sock" >>"$logf" 2>&1 || true
       kill -0 "$qpid" 2>/dev/null && sleep 1
     done' kdevm-bridge-supervisor "$HELPER" "$pid" "$CLIP" "$STATE/clipboard-bridge.log" </dev/null >/dev/null 2>&1 &
-  local spid=$!
-  echo "$spid $(proc_start $spid)" > "$BRIDGEPID"
+  local spid=$! sstart
+  sstart=$(proc_start $spid); [[ -n "$sstart" ]] && echo "$spid $sstart" > "$BRIDGEPID"
   # Window size: KScreen restores the guest's last mode and the Cocoa window
   # follows the guest, so the first window can come up small (492x277 points
   # seen). Once the window exists, size it to the display minus margins; the
@@ -277,6 +236,7 @@ up() {
 }
 
 down() {
+  refuse_if_unknown "stop"
   if ! running; then
     # No QEMU: a verified supervisor of ours (if any lingers) is stopped too.
     local lp; lp=$(bridge_pid); [[ -n "$lp" ]] && { kill "$lp" 2>/dev/null || true; }
@@ -294,7 +254,7 @@ down() {
     qmp system_powerdown >/dev/null 2>&1 || true
   fi
   for i in {1..45}; do kill -0 "$pid" 2>/dev/null || break; sleep 1; done
-  if kill -0 "$pid" 2>/dev/null; then log "guest did not power off in 45 s; terminating"; kill "$pid"; sleep 2; kill -9 "$pid" 2>/dev/null || true; fi
+  if kill -0 "$pid" 2>/dev/null; then log "guest did not power off in 45 s; terminating"; kill "$pid" 2>/dev/null || true; sleep 2; kill -9 "$pid" 2>/dev/null || true; fi
   local bpid; bpid=$(bridge_pid); [[ -n "$bpid" ]] && { kill "$bpid" 2>/dev/null || true; }
   rm -f "$PIDFILE" "$BRIDGEPID" "$QMP" "$CLIP"
   log "stopped (overlay kept; 'up' resumes it)"
@@ -350,7 +310,10 @@ status() {
     echo "-- overlay: $WORK, allocated $(du -h "$WORK" | cut -f1), virtual $("$QEMU_IMG" info "$WORK" 2>/dev/null | awk -F': ' '/virtual size/{print $2}')"
   else echo "-- overlay: none"; fi
   echo "-- config: $CPUS vCPU, ${MEM_MB} MB, scale $(scale_hint), share $SHARE"
-  if running; then
+  local qs; qs=$(qemu_state)
+  if [[ "$qs" == unknown ]]; then
+    echo "-- qemu: UNKNOWN: pid $(head -1 "$PIDFILE" | cut -d' ' -f1) is alive but could not be inspected; lifecycle verbs will refuse until this is resolved"
+  elif running; then
     echo "-- qemu: pid $(qemu_pid), $(qmp query-status 2>/dev/null || echo 'QMP not answering')"
     [[ -n "$(bridge_pid)" ]] && echo "-- clipboard bridge: supervisor pid $(bridge_pid), helper $(pgrep -f 'bridge-native-clipboard' | head -1 || echo not-running)"
     if nc -z -G 2 localhost "$SSH_PORT" 2>/dev/null; then

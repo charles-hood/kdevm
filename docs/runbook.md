@@ -104,6 +104,24 @@ start when any untracked QEMU holds the overlay. Then: `down` (ssh path,
 since the first QEMU's QMP socket had been unlinked), supervisor gone,
 `up`, QMP answering, a duplicate `up` refused, one QEMU process.
 
+### Third pass (Codex, commit 2038ae3): lock, identity, readiness, cleanup ownership
+
+All lifecycle mechanics moved into `lib/kdevm-common.zsh`, sourced by the
+three scripts and the tests, so there is one implementation of each.
+
+| item | what was wrong | fix | validated by |
+|---|---|---|---|
+| lock takeover not exclusive | a contender renamed whichever directory sat at the lock path, possibly a live owner's; a lock existed briefly without its pid | acquisition is one `os.rename` of a directory already holding the owner pid (never a pid-less lock); takeover is won by `mkdir lock/takeover`, the winner re-reads the owner and backs off if alive; an abandoned marker is honoured 30 s | live owner with a marker inside: not stolen; abandoned old marker: recovered; two contenders vs one dead owner: one holder |
+| empty start time accepted | a pid-only record passed identity | `pid_state` returns `absent` for any record without a start time | pid-only record: sleeper untouched, record dropped |
+| `ps` failure disowned a live VM | inspection failure deleted the pid file | tri-state `pid_state` (running, unknown, absent); `unknown` keeps the record, `status` says UNKNOWN, `up`/`down`/`destroy`/`rebuild` refuse with instructions | fake `ps` that fails: record kept, verb refused, process untouched |
+| QMP helper exit 0 on EOF or error | readiness gate accepted nothing | `qmp()` exits 0 only on a `return`, 2 on connect/greeting/EOF, 3 on an error reply; `up` requires `"running": true` and re-checks liveness | fake QMP servers: close, error, ok |
+| failed readiness orphaned a live child | pid file deleted, child left running | `up` terminates its own child (TERM, wait, KILL) before dropping the identity | fake QEMU that binds its sockets and never answers: terminated, non-zero exit, no pid file |
+| cleanup before ownership | a lock-refused builder removed the active build's seed | `cleanup()` touches build artifacts only after `OWNED=1` (lock held or inherited); the lock is released only by its owner pid | refused builder: the other build's seed survives |
+
+Live, after the refactor: `down` (ssh), lock released, `up` tracked and
+QMP answering, duplicate `up` refused, supervisor visible as
+`kdevm-bridge-supervisor <qemu pid>` with its start time recorded, one QEMU.
+
 ## Rules that are easy to forget
 
 - `gic-version=3` is mandatory under HVF on this QEMU; it rejects GICv2.
