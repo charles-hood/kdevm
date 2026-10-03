@@ -1,0 +1,10 @@
+# kdevm keeps every large or generated artifact outside the repo:
+#   ~/Artifacts/kdevm-runtime/<pin>/   built QEMU runtime + helper
+#   ~/.cache/kdevm/                    images, overlays, sockets, logs, build scratch
+.DS_Store
+*.log
+*.qcow2
+*.img
+*.iso
+*.fd
+.build/

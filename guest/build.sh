@@ -1,0 +1,193 @@
+#!/bin/zsh
+# Build the kdevm factory image: Debian 13 generic arm64 cloud image + cloud-init
+# (guest/user-data.yaml.tmpl) booted ONCE headless under the kdevm runtime, then
+# checked and powered off. The result, ~/.cache/kdevm/factory.qcow2, is the
+# "image"; kdevm.sh up runs a throwaway overlay on it (the "container").
+#
+#   guest/build.sh            build (refuses if factory.qcow2 exists; use rebuild)
+#   guest/build.sh --force    replace an existing factory
+#
+# Needs: the runtime (runtime/build.sh), mkisofs (brew cdrtools), the house
+# password file in home-network/secrets, ~/.ssh/id_ed25519.pub.
+set -euo pipefail
+
+REPO="$(cd "$(dirname "$0")/.." && pwd)"
+STATE="${KDEVM_STATE:-$HOME/.cache/kdevm}"
+RT="${KDEVM_RUNTIME:-$HOME/Artifacts/kdevm-runtime/current}"
+QEMU="$RT/bin/qemu-system-aarch64"
+QEMU_IMG="${QEMU_IMG:-/opt/homebrew/bin/qemu-img}"
+FW_CODE="${KDEVM_FW_CODE:-/opt/homebrew/share/qemu/edk2-aarch64-code.fd}"
+FW_VARS_TEMPLATE="${KDEVM_FW_VARS:-/opt/homebrew/share/qemu/edk2-arm-vars.fd}"
+IMAGE_URL=https://cloud.debian.org/images/cloud/trixie/latest
+IMAGE=debian-13-generic-arm64.qcow2
+USER_NAME="${KDEVM_USER:-charles}"
+PASS_FILE="${KDEVM_PASS_FILE:-$HOME/projects/home-network/secrets/xrdp-desktop-pass.txt}"
+SSH_PUB="${KDEVM_SSH_PUB:-$HOME/.ssh/id_ed25519.pub}"
+SSH_PORT="${KDEVM_SSH_PORT:-2222}"
+DISK_GB="${KDEVM_DISK_GB:-40}"
+FACTORY="$STATE/factory.qcow2"
+INFO="$STATE/factory-info.txt"
+KNOWN_HOSTS="$STATE/known_hosts"
+SSH_OPTS=(-p "$SSH_PORT" -o UserKnownHostsFile="$KNOWN_HOSTS" -o StrictHostKeyChecking=no
+          -o LogLevel=ERROR -o ConnectTimeout=5 -o BatchMode=yes)
+
+die() { echo "guest/build.sh: $*" >&2; exit 1; }
+log() { echo "== $(date +%H:%M:%S) $*"; }
+
+[[ -x "$QEMU" ]] || die "runtime missing at $RT; run runtime/build.sh first"
+[[ -x "$QEMU_IMG" ]] || die "qemu-img missing (brew install qemu)"
+command -v mkisofs >/dev/null || die "mkisofs missing (brew install cdrtools)"
+[[ -f "$FW_CODE" && -f "$FW_VARS_TEMPLATE" ]] || die "edk2 firmware missing at $FW_CODE / $FW_VARS_TEMPLATE"
+[[ -f "$PASS_FILE" ]] || die "password file missing: $PASS_FILE"
+[[ -f "$SSH_PUB" ]] || die "ssh public key missing: $SSH_PUB"
+if [[ -f "$FACTORY" && "${1:-}" != --force ]]; then
+  die "$FACTORY exists; use 'kdevm.sh rebuild' or --force"
+fi
+pgrep -qf "file=$STATE/(factory|work).qcow2" && die "a kdevm VM is running; 'kdevm.sh down' first"
+
+mkdir -p "$STATE"
+t0=$(date +%s)
+
+# ---- 1. base image, verified ------------------------------------------------
+if [[ ! -f "$STATE/$IMAGE" ]]; then
+  log "downloading $IMAGE"
+  curl -sSL -o "$STATE/SHA512SUMS" "$IMAGE_URL/SHA512SUMS"
+  curl -sSL -o "$STATE/$IMAGE.part" "$IMAGE_URL/$IMAGE"
+  mv "$STATE/$IMAGE.part" "$STATE/$IMAGE"
+fi
+( cd "$STATE" && grep " $IMAGE\$" SHA512SUMS | shasum -a 512 -c - >/dev/null ) || die "$IMAGE failed SHA512 check"
+IMAGE_SHA=$(grep " $IMAGE\$" "$STATE/SHA512SUMS" | cut -c1-16)
+log "base image $IMAGE (sha512 $IMAGE_SHA...) verified"
+
+# ---- 2. factory disk --------------------------------------------------------
+WORK="$FACTORY.building"
+rm -f "$WORK"
+cp "$STATE/$IMAGE" "$WORK"
+"$QEMU_IMG" resize -q "$WORK" "${DISK_GB}G"
+
+# ---- 3. cloud-init seed -----------------------------------------------------
+SEED_DIR="$STATE/seed"; rm -rf "$SEED_DIR"; mkdir -p "$SEED_DIR"
+# Literal token replacement (no sed: a password with & or | must survive).
+V="$REPO/guest/vendor"
+KDEVM_USER_NAME="$USER_NAME" KDEVM_PASS="$(tr -d '\n' < "$PASS_FILE")" KDEVM_SSHKEY="$(tr -d '\n' < "$SSH_PUB")" \
+python3 - "$REPO/guest/user-data.yaml.tmpl" "$SEED_DIR/user-data" \
+  "$V/omarchy-native-clipboard-bridge" "$V/omarchy-native-clipboard-bridge.service" \
+  "$V/92-omarchy-native-clipboard.rules" "$V/90-try-omarchy-quantum.conf" \
+  "$REPO/guest/files/firefox-policies.json" <<'PY'
+import base64, os, sys
+tmpl, out, agent, unit, udev, quantum, firefox = sys.argv[1:]
+b64 = lambda p: base64.b64encode(open(p, "rb").read()).decode()
+text = open(tmpl).read()
+for k, v in {
+    "@@USER@@": os.environ["KDEVM_USER_NAME"],
+    "@@PASS@@": os.environ["KDEVM_PASS"],
+    "@@SSHKEY@@": os.environ["KDEVM_SSHKEY"],
+    "@@B64_CLIPBOARD_AGENT@@": b64(agent),
+    "@@B64_CLIPBOARD_UNIT@@": b64(unit),
+    "@@B64_CLIPBOARD_UDEV@@": b64(udev),
+    "@@B64_PIPEWIRE_QUANTUM@@": b64(quantum),
+    "@@B64_FIREFOX_POLICIES@@": b64(firefox),
+}.items():
+    text = text.replace(k, v)
+open(out, "w").write(text)
+PY
+grep -q '@@' "$SEED_DIR/user-data" && die "unrendered token in user-data"
+printf 'instance-id: kdevm-factory-%s\nlocal-hostname: kdevm\n' "$(date +%Y%m%d%H%M%S)" > "$SEED_DIR/meta-data"
+mkisofs -quiet -V cidata -J -r -o "$STATE/seed.iso" "$SEED_DIR/user-data" "$SEED_DIR/meta-data"
+
+# ---- 4. headless provisioning boot -----------------------------------------
+# Private, throwaway UEFI variable store for THIS boot: the Homebrew template
+# is never attached writable by any kdevm boot.
+PROV_VARS="$STATE/provision-vars.fd"
+cp "$FW_VARS_TEMPLATE" "$PROV_VARS"
+SERIAL="$STATE/factory-serial.log"; : > "$SERIAL"
+rm -f "$KNOWN_HOSTS"
+log "booting headless for provisioning (serial: $SERIAL)"
+"$QEMU" \
+  -machine virt,accel=hvf,gic-version=3 -cpu host,pmu=off \
+  -smp 4,sockets=1,cores=4,threads=1 -m 6144M -nodefaults \
+  -drive if=pflash,format=raw,readonly=on,file="$FW_CODE" \
+  -drive if=pflash,format=raw,file="$PROV_VARS" \
+  -drive if=none,id=root,file="$WORK",format=qcow2,cache=writeback \
+  -device virtio-blk-pci,drive=root \
+  -drive if=none,id=seed,file="$STATE/seed.iso",format=raw,readonly=on \
+  -device virtio-blk-pci,drive=seed \
+  -netdev user,id=net,hostfwd=tcp:127.0.0.1:$SSH_PORT-:22 -device virtio-net-pci,netdev=net \
+  -object rng-random,id=rng,filename=/dev/urandom -device virtio-rng-pci,rng=rng \
+  -display none -serial "file:$SERIAL" -monitor none &
+QPID=$!
+trap 'kill $QPID 2>/dev/null; rm -f "$WORK" "$PROV_VARS"' EXIT
+
+# ---- 5. wait for ssh, then for cloud-init -----------------------------------
+log "waiting for ssh on localhost:$SSH_PORT"
+for i in {1..120}; do
+  ssh "${SSH_OPTS[@]}" "$USER_NAME@localhost" true 2>/dev/null && break
+  kill -0 $QPID 2>/dev/null || die "QEMU exited during provisioning; see $SERIAL"
+  sleep 5
+done
+ssh "${SSH_OPTS[@]}" "$USER_NAME@localhost" true || die "ssh never answered; see $SERIAL"
+log "ssh up after $(( $(date +%s) - t0 )) s; waiting for cloud-init (apt over the WAN, several minutes)"
+ssh "${SSH_OPTS[@]}" "$USER_NAME@localhost" 'sudo cloud-init status --wait --long' || {
+  ssh "${SSH_OPTS[@]}" "$USER_NAME@localhost" 'sudo tail -40 /var/log/cloud-init-output.log' || true
+  die "cloud-init reported an error"
+}
+t1=$(date +%s)
+log "cloud-init done at $((t1 - t0)) s"
+
+# ---- 6. kernel capability checks (fatal) and provenance ---------------------
+log "kernel capability checks"
+CHECKS=$(ssh "${SSH_OPTS[@]}" "$USER_NAME@localhost" 'bash -s' <<'EOF'
+set -u
+cfg=/boot/config-$(uname -r)
+fail=0
+has() { # module name, CONFIG symbol
+  if modinfo -n "$1" >/dev/null 2>&1; then echo "ok   $1 (module)"
+  elif grep -q "^$2=y" "$cfg" 2>/dev/null; then echo "ok   $1 (built-in $2)"
+  else echo "FAIL $1 ($2 absent)"; fail=1; fi
+}
+has virtio_gpu     CONFIG_DRM_VIRTIO_GPU
+has virtio_input   CONFIG_VIRTIO_INPUT
+has virtio_blk     CONFIG_VIRTIO_BLK
+has virtio_net     CONFIG_VIRTIO_NET
+has virtio-rng     CONFIG_HW_RANDOM_VIRTIO
+has virtio_balloon CONFIG_VIRTIO_BALLOON
+has 9p             CONFIG_9P_FS
+has 9pnet          CONFIG_NET_9P
+has 9pnet_virtio   CONFIG_NET_9P_VIRTIO
+has snd_hda_intel  CONFIG_SND_HDA_INTEL
+has qemu_fw_cfg    CONFIG_FW_CFG_SYSFS
+if grep -q '^CONFIG_PAGE_REPORTING=y' "$cfg"; then echo "ok   free-page reporting (CONFIG_PAGE_REPORTING)"; else echo "FAIL CONFIG_PAGE_REPORTING"; fail=1; fi
+echo "sessions wayland: $(ls /usr/share/wayland-sessions 2>/dev/null | tr '\n' ' ')"
+echo "sessions x11:     $(ls /usr/share/xsessions 2>/dev/null | tr '\n' ' ')"
+ls /usr/share/wayland-sessions/plasma.desktop >/dev/null 2>&1 || { echo "FAIL plasma.desktop wayland session missing"; fail=1; }
+echo "kernel:  $(uname -r)"
+echo "mesa:    $(dpkg-query -W -f='${Version}' libgl1-mesa-dri 2>/dev/null)"
+echo "kwin:    $(dpkg-query -W -f='${Version}' kwin-wayland 2>/dev/null)"
+echo "plasma:  $(dpkg-query -W -f='${Version}' plasma-workspace 2>/dev/null)"
+echo "chrome:  $(google-chrome --version 2>/dev/null)"
+echo "firefox: $(firefox-esr --version 2>/dev/null)"
+echo "sddm:    $(dpkg-query -W -f='${Version}' sddm 2>/dev/null)"
+exit $fail
+EOF
+) && CHECK_RC=0 || CHECK_RC=$?
+echo "$CHECKS"
+[[ $CHECK_RC -eq 0 ]] || die "kernel capability checks failed; factory NOT produced"
+
+{
+  echo "factory built: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  echo "base image: $IMAGE sha512 $(grep " $IMAGE\$" "$STATE/SHA512SUMS" | cut -d' ' -f1)"
+  echo "runtime: $(readlink "$RT" 2>/dev/null || echo "$RT")"
+  echo "$CHECKS"
+} > "$INFO"
+
+# ---- 7. power off, finalize --------------------------------------------------
+log "powering off"
+ssh "${SSH_OPTS[@]}" "$USER_NAME@localhost" 'sudo cloud-init clean --logs; sync; sudo poweroff' 2>/dev/null || true
+for i in {1..60}; do kill -0 $QPID 2>/dev/null || break; sleep 1; done
+kill -0 $QPID 2>/dev/null && { echo "QEMU still up after 60 s; killing" >&2; kill $QPID; sleep 1; }
+trap - EXIT
+rm -f "$PROV_VARS" "$STATE/seed.iso" "$KNOWN_HOSTS"; rm -rf "$SEED_DIR"
+mv "$WORK" "$FACTORY"
+t2=$(date +%s)
+echo "factory time: $((t2 - t0)) s (ssh up at $(( t1 - t0 )) s incl. cloud-init)" >> "$INFO"
+log "factory ready: $FACTORY ($(du -h "$FACTORY" | cut -f1) on disk) in $((t2 - t0)) s"

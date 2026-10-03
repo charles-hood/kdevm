@@ -1,0 +1,252 @@
+#cloud-config
+# kdevm factory: Debian 13 (generic arm64 cloud image) + KDE Plasma 6 Wayland,
+# Google Chrome (native arm64) + Firefox ESR, PipeWire, sddm auto-login, the
+# try-omarchy clipboard agent, a 9p mount for the shared Mac folder.
+# Rendered by guest/build.sh: @@TOKENS@@ are replaced, vendored files are
+# inlined base64. Derived from home-network's dell-labvm.sh kde profile and
+# scripts/desktop-kde/Dockerfile, minus everything xrdp.
+
+hostname: kdevm
+manage_etc_hosts: true
+timezone: America/New_York
+
+users:
+  - name: @@USER@@
+    gecos: Charles
+    shell: /bin/bash
+    groups: [sudo, render, video, audio, users, plugdev, netdev]
+    lock_passwd: false
+    # NOPASSWD is the house convention for a local cattle desktop (the
+    # container has it too). It is TEMPORARY by design: it bypasses PAM, so it
+    # must go if Touch ID sudo (try-omarchy's authentication bridge) is wired in.
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    ssh_authorized_keys:
+      - @@SSHKEY@@
+
+chpasswd:
+  expire: false
+  users:
+    - name: @@USER@@
+      password: @@PASS@@
+      type: text
+
+ssh_pwauth: false
+
+growpart:
+  mode: auto
+  devices: ["/"]
+
+package_update: true
+package_upgrade: true
+packages:
+  # Plasma 6 Wayland session (dell-kde list minus xrdp/xorgxrdp, plus the
+  # Wayland pieces; kwin-x11 is NOT installed unless the Phase 2 fallback needs it)
+  - kde-plasma-desktop
+  - plasma-workspace
+  - kwin-wayland
+  - sddm
+  - konsole
+  - dolphin
+  - systemsettings
+  - kde-cli-tools
+  - plasma-pa
+  - kscreen
+  - xwayland
+  - fonts-noto-core
+  - fonts-noto-ui-core
+  - fonts-noto-color-emoji
+  - fastfetch
+  # sound: real HDA device this time, PipeWire owns it
+  - pipewire
+  - wireplumber
+  - pipewire-pulse
+  - pulseaudio-utils
+  # browsers (Chrome comes from Google's .deb in runcmd)
+  - firefox-esr
+  # clipboard agent needs wl-paste/wl-copy; preflight needs eglinfo and kmscube
+  - wl-clipboard
+  - mesa-utils
+  - kmscube
+  # workable-Linux tools line, verbatim from scripts/desktop-kde/Dockerfile
+  - iproute2
+  - iputils-ping
+  - bind9-dnsutils
+  - traceroute
+  - mtr-tiny
+  - netcat-openbsd
+  - tcpdump
+  - curl
+  - wget
+  - openssh-client
+  - rsync
+  - git
+  - less
+  - nano
+  - vim
+  - htop
+  - file
+  - unzip
+  - zip
+  - xz-utils
+  - bzip2
+  - lsof
+  - strace
+
+write_files:
+  # ---- display manager: straight into Plasma Wayland, no greeter ----------
+  - path: /etc/sddm.conf.d/kdevm.conf
+    permissions: "0644"
+    content: |
+      [Autologin]
+      User=@@USER@@
+      Session=plasma
+      Relogin=false
+      [General]
+      DisplayServer=wayland
+  # ---- fw_cfg hints from the host (scale) need the sysfs driver loaded -----
+  - path: /etc/modules-load.d/kdevm.conf
+    permissions: "0644"
+    content: |
+      qemu_fw_cfg
+  # ---- first login: apply the host's scale hint once -----------------------
+  - path: /usr/local/bin/kdevm-first-login
+    permissions: "0755"
+    content: |
+      #!/bin/bash
+      # Runs from the Plasma autostart. Reads the scale hint the host passed
+      # through QEMU fw_cfg and applies it ONCE, then leaves KScreen alone so
+      # the user's own choices stick. "auto" means trust Plasma's detection.
+      sentinel="$HOME/.local/state/kdevm/scale-applied"
+      [ -e "$sentinel" ] && exit 0
+      hint=$(tr -d '\0\n' < /sys/firmware/qemu_fw_cfg/by_name/opt/kdevm/scale/raw 2>/dev/null)
+      case "$hint" in
+        1|2|1.5|1.25|1.75)
+          sleep 3   # let kscreen settle after login
+          kscreen-doctor "output.Virtual-1.scale.$hint" && \
+            logger -t kdevm "applied scale $hint from fw_cfg"
+          ;;
+        *) logger -t kdevm "scale hint '$hint': leaving Plasma's own choice" ;;
+      esac
+      mkdir -p "$(dirname "$sentinel")" && date > "$sentinel"
+  - path: /etc/xdg/autostart/kdevm-first-login.desktop
+    permissions: "0644"
+    content: |
+      [Desktop Entry]
+      Type=Application
+      Name=kdevm first login
+      Exec=/usr/local/bin/kdevm-first-login
+      OnlyShowIn=KDE;
+      X-KDE-autostart-phase=2
+  # ---- shared Mac folder: fixed mount point, 9p over virtio, tag "mac" -----
+  - path: /etc/systemd/system/home-@@USER@@-Mac.mount
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=Shared Mac folder (virtio-9p, tag mac)
+      After=local-fs.target
+      ConditionPathExists=/sys/bus/virtio/drivers/9pnet_virtio
+
+      [Mount]
+      What=mac
+      Where=/home/@@USER@@/Mac
+      Type=9p
+      Options=trans=virtio,version=9p2000.L,msize=512000,cache=none,nofail,_netdev
+
+      [Install]
+      WantedBy=multi-user.target
+  # ---- try-omarchy guest pieces, vendored verbatim (guest/vendor/) ---------
+  - path: /usr/local/bin/omarchy-native-clipboard-bridge
+    permissions: "0755"
+    encoding: b64
+    content: @@B64_CLIPBOARD_AGENT@@
+  - path: /etc/systemd/user/omarchy-native-clipboard-bridge.service
+    permissions: "0644"
+    encoding: b64
+    content: @@B64_CLIPBOARD_UNIT@@
+  - path: /etc/udev/rules.d/92-omarchy-native-clipboard.rules
+    permissions: "0644"
+    encoding: b64
+    content: @@B64_CLIPBOARD_UDEV@@
+  - path: /etc/pipewire/pipewire.conf.d/90-try-omarchy-quantum.conf
+    permissions: "0644"
+    encoding: b64
+    content: @@B64_PIPEWIRE_QUANTUM@@
+  # ---- Firefox: same policy file as the container ---------------------------
+  - path: /usr/lib/firefox-esr/distribution/policies.json
+    permissions: "0644"
+    encoding: b64
+    content: @@B64_FIREFOX_POLICIES@@
+  # ---- Chrome: same four managed keys as the container and dell-kde ----------
+  - path: /etc/opt/chrome/policies/managed/kdevm.json
+    permissions: "0644"
+    content: |
+      {
+        "MetricsReportingEnabled": false,
+        "DefaultBrowserSettingEnabled": false,
+        "PromotionsEnabled": false,
+        "BackgroundModeEnabled": false
+      }
+  - path: "/home/@@USER@@/.config/google-chrome/First Run"
+    owner: @@USER@@:@@USER@@
+    permissions: "0644"
+    defer: true
+    content: ""
+  - path: /home/@@USER@@/.config/mimeapps.list
+    owner: @@USER@@:@@USER@@
+    permissions: "0644"
+    defer: true
+    content: |
+      [Default Applications]
+      x-scheme-handler/http=google-chrome.desktop
+      x-scheme-handler/https=google-chrome.desktop
+      text/html=google-chrome.desktop
+  # ---- Plasma per-user defaults (compositing stays ON: that is the point) ---
+  - path: /home/@@USER@@/.config/kwalletrc
+    owner: @@USER@@:@@USER@@
+    permissions: "0644"
+    defer: true
+    content: |
+      [Wallet]
+      Enabled=false
+  - path: /home/@@USER@@/.config/kscreenlockerrc
+    owner: @@USER@@:@@USER@@
+    permissions: "0644"
+    defer: true
+    content: |
+      [Daemon]
+      Autolock=false
+      LockOnResume=false
+  # ---- native Wayland for the browsers --------------------------------------
+  - path: /etc/environment.d/90-kdevm.conf
+    permissions: "0644"
+    content: |
+      ELECTRON_OZONE_PLATFORM_HINT=wayland
+      MOZ_ENABLE_WAYLAND=1
+
+runcmd:
+  # Google Chrome, native arm64, exactly as scripts/desktop-kde/Dockerfile.
+  - [ sh, -c, "curl -fsSL -o /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_arm64.deb && apt-get install -y /tmp/chrome.deb && rm -f /tmp/chrome.deb" ]
+  # Chrome on Wayland natively (XWayland otherwise); Google's launcher reads this file.
+  - [ sh, -c, "install -d -o @@USER@@ -g @@USER@@ /home/@@USER@@/.config && printf -- '--ozone-platform-hint=auto\n' > /home/@@USER@@/.config/chrome-flags.conf && chown @@USER@@:@@USER@@ /home/@@USER@@/.config/chrome-flags.conf" ]
+  # Discover is not installed (apt owns packages): give its panel pin and
+  # start-menu favorite to Konsole, and pin both browsers BY NAME (Plasma's
+  # preferred://browser placeholder became two Chrome icons on 2026-09-29).
+  - |
+    tm=/usr/share/plasma/plasmoids/org.kde.plasma.taskmanager/contents/config/main.xml
+    ko=/usr/share/plasma/plasmoids/org.kde.plasma.kickoff/contents/config/main.xml
+    sed -i 's|org.kde.discover.desktop|org.kde.konsole.desktop|g' "$tm" "$ko" || true
+    sed -i 's|preferred://filemanager,preferred://browser|preferred://filemanager,applications:firefox-esr.desktop,applications:google-chrome.desktop|' "$tm" || true
+    sed -i 's|<default>preferred://browser,|<default>firefox-esr.desktop,google-chrome.desktop,|' "$ko" || true
+  - apt-get purge -y plasma-welcome || true
+  - apt-get autoremove -y || true
+  # services: Mac share mount, clipboard agent for every graphical session, graphical boot
+  - systemctl daemon-reload
+  - systemctl enable home-@@USER@@-Mac.mount
+  - systemctl --global enable omarchy-native-clipboard-bridge.service
+  - udevadm control --reload
+  - systemctl set-default graphical.target
+  - systemctl enable sddm
+  - [ sh, -c, "install -d -o @@USER@@ -g @@USER@@ /home/@@USER@@/Mac /home/@@USER@@/.local/state/kdevm" ]
+  - [ sh, -c, "chown -R @@USER@@:@@USER@@ /home/@@USER@@/.config" ]
+
+final_message: "kdevm factory provisioned after $UPTIME s"

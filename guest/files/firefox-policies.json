@@ -1,0 +1,19 @@
+{
+  "policies": {
+    "OverrideFirstRunPage": "",
+    "OverridePostUpdatePage": "",
+    "DisableProfileImport": true,
+    "NoDefaultBookmarks": true,
+    "DontCheckDefaultBrowser": true,
+    "DisableTelemetry": true,
+    "DisableFirefoxStudies": true,
+    "DisableAppUpdate": true,
+    "SkipTermsOfUse": true,
+    "Preferences": {
+      "media.webspeech.synth.enabled": {
+        "Value": false,
+        "Status": "locked"
+      }
+    }
+  }
+}
