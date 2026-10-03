@@ -170,6 +170,22 @@ up() {
       kill -0 $pid 2>/dev/null && sleep 1
     done ) </dev/null >/dev/null 2>&1 &
   echo $! > "$BRIDGEPID"
+  # Window size: KScreen restores the guest's last mode and the Cocoa window
+  # follows the guest, so the first window can come up small (492x277 points
+  # seen). Once the window exists, size it to the display minus margins; the
+  # guest follows through the EDID. KDEVM_WINDOW=WxH overrides; "keep" skips.
+  # Needs Accessibility for the calling terminal; failure is silent.
+  ( local w h pw ph; read -r pw ph < <(display_pixels); pw=$((pw / $(scale_hint))); ph=$((ph / $(scale_hint)))
+    case "${KDEVM_WINDOW:-auto}" in
+      keep) exit 0 ;;
+      auto) w=$((pw - 80)); h=$((ph - 140)) ;;
+      *) w=${KDEVM_WINDOW%x*}; h=${KDEVM_WINDOW#*x} ;;
+    esac
+    for i in {1..40}; do
+      osascript -e "tell application \"System Events\" to tell (first process whose unix id is $pid) to set position of window 1 to {40, 50}" \
+                -e "tell application \"System Events\" to tell (first process whose unix id is $pid) to set size of window 1 to {$w, $h}" >/dev/null 2>&1 && exit 0
+      sleep 0.5
+    done ) </dev/null >/dev/null 2>&1 &
   disown 2>/dev/null || true
   log "up: pid $pid, window open; ssh with: kdevm.sh ssh"
 }
