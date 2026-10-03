@@ -136,11 +136,19 @@ if [ "$hit" = 1 ] && [ -n "$KDEVM_TEST_UNKNOWN_PID" ]; then for a in "$@"; do [ 
 exec /bin/ps "$@"
 EOF
 mkdir -p "$T/v4h" "$T/fakert4/current/bin"; : > "$T/fakert4/current/bin/qemu-system-aarch64"; : > "$T/fakert4/current/bin/omarchy-vm-helper"; chmod +x "$T/fakert4/current/bin/"*
+# Network isolation for this fixture: status probes the ssh port with `nc`
+# and, if it answers, runs diagnostics over `ssh`. Both are called by bare
+# name, so stubs first in PATH intercept every call; the stubs log and fail
+# (port "not answering", ssh exit 255), and nothing can reach a real service.
+mkdir -p "$T/netstub"
+printf '#!/bin/sh\necho "nc $*" >> "$KDEVM_TEST_NETLOG"; exit 1\n' > "$T/netstub/nc"
+printf '#!/bin/sh\necho "ssh $*" >> "$KDEVM_TEST_NETLOG"; exit 255\n' > "$T/netstub/ssh"
+chmod +x "$T/netstub/nc" "$T/netstub/ssh"; export KDEVM_TEST_NETLOG="$T/v4h/netlog"; : > "$KDEVM_TEST_NETLOG"
 ARGV0="kdevm-bridge-supervisor 1" zsh -c 'sleep 120; :' & SV3=$!; sleep 0.3
 echo "$SV3 $(ps -o lstart= -p $SV3 | awk '{$1=$1; print}')" > "$T/v4h/clipboard-bridge.pid"
 st_ok=1
 check_status() { # label, expected qemu line fragment
-  local out; out=$(PATH="$T/fakebin2:$PATH" KDEVM_TEST_UNKNOWN_PID="${3:-$SV3}" KDEVM_STATE="$T/v4h" KDEVM_RUNTIME_ROOT="$T/fakert4" ./kdevm.sh status 2>&1)
+  local out; out=$(PATH="$T/netstub:$T/fakebin2:$PATH" KDEVM_TEST_UNKNOWN_PID="${3:-$SV3}" KDEVM_STATE="$T/v4h" KDEVM_RUNTIME_ROOT="$T/fakert4" ./kdevm.sh status 2>&1)
   if [[ "$out" == *"clipboard bridge: UNKNOWN"* && "$out" == *"$2"* && -f "$T/v4h/clipboard-bridge.pid" ]] && kill -0 $SV3 2>/dev/null; then pass "status: supervisor UNKNOWN reported and record kept with QEMU $1"; else st_ok=0; fail "status with QEMU $1: $(echo "$out" | grep -E 'qemu:|bridge' | tr '\n' ' ')"; fi
 }
 # (a) QEMU absent: no qemu.pid
@@ -153,6 +161,10 @@ check_status running "qemu: pid $FQ"
 printf '#!/bin/sh\nfor a in "$@"; do [ "$a" = "lstart=" ] && exit 1; done\nexec /bin/ps "$@"\n' > "$T/fakebin2/ps"
 check_status unknown "qemu: UNKNOWN"
 [[ -f "$T/v4h/qemu.pid" ]] && pass "status: QEMU record kept while unknown" || fail "status dropped the QEMU record while unknown"
+# isolation proof: the running-QEMU case probed the port through the stub (logged, "not answering"),
+# so ssh was never attempted, and no real nc or ssh ran (the stubs shadow them for every call)
+if grep -q '^nc .*localhost' "$KDEVM_TEST_NETLOG" && ! grep -q '^ssh ' "$KDEVM_TEST_NETLOG"; then pass "status fixture: port probe intercepted by the nc stub, ssh never attempted, no real service contacted"; else fail "status fixture network isolation (log: $(tr '\n' ';' < "$KDEVM_TEST_NETLOG"))"; fi
+unset KDEVM_TEST_NETLOG
 kill $SV3 $FQ 2>/dev/null; wait $SV3 $FQ 2>/dev/null
 
 # 5. lock (finding 5): kernel advisory lock (zsystem flock), held for the
