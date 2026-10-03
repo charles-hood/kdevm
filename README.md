@@ -28,7 +28,7 @@ rasterization and WebGL on `virgl (Apple M4 Pro)`, no GPU-process crashes.
 | | |
 |---|---|
 | Runtime build (QEMU + VirGL + libslirp + helper) | 96 s + 21 s |
-| Factory image build (cloud-init, Plasma, both browsers) | about 110 s |
+| Factory image build (cloud-init, Plasma, both browsers, the battery module) | about 2 minutes (102 to 121 s), 4.3 GB on disk |
 | Boot to a logged-in desktop | 14 s |
 | Clean power-off | 3 s |
 | Idle QEMU CPU | about 7% of one core (5.4% median) |
@@ -36,7 +36,9 @@ rasterization and WebGL on `virgl (Apple M4 Pro)`, no GPU-process crashes.
 | Live resize | the guest mode follows the window through the virtio-gpu EDID, no helper needed |
 
 Measured with try-omarchy's `profile-process.py`; method and provenance in
-[docs/runbook.md](docs/runbook.md).
+[docs/runbook.md](docs/runbook.md). The factory row is current. Every other
+row was measured on 0.1.0, before the time zone and battery bridges and the
+power applet were added, and has not been measured again.
 
 ## Requirements
 
@@ -196,10 +198,17 @@ fw_cfg opt/kdevm/*         <-- per-launch hints (scale)                     <-- 
 
 ## Roadmap
 
-try-omarchy's helper already carries the host half of each of these; adding
-one is wiring, not writing: audio device picker (choose the Mac output from
-Plasma's applet), Mac camera (`v4l2loopback`), Touch ID for sudo, USB
-passthrough, bridged networking. See the roadmap section of [docs/plan.md](docs/plan.md).
+try-omarchy's helper already carries the host half of each of these, and on
+the host one more bridge is now a few lines: a port and an entry for the
+supervisor. The guest half is the real work and differs every time. The
+battery side could be vendored verbatim, kernel module included; the time
+zone receiver had to be written, because theirs is tied to Omarchy's menus.
+Not started: audio device picker (choose the Mac output from Plasma's
+applet), Mac camera (`v4l2loopback`), Touch ID for sudo (PAM, and the end of
+passwordless sudo), USB passthrough, bridged networking. Upstream also
+mirrors the Mac keyboard and language and recovers the guest clock after the
+Mac sleeps; neither has been sized for kdevm. See the roadmap section of
+[docs/plan.md](docs/plan.md).
 
 ## Documentation
 
