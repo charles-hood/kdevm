@@ -40,11 +40,12 @@ Measured with try-omarchy's `profile-process.py`; method and provenance in
 
 - Apple Silicon Mac, macOS 15 or newer (built and tested on 27.0.1).
 - Xcode or the Command Line Tools (clang, Swift 6, codesign).
-- Homebrew `qemu` (for `qemu-img` and the EDK II firmware files) and
-  `cdrtools` (for `mkisofs`):
+- Homebrew `qemu` (for `qemu-img` and the EDK II firmware files),
+  `cdrtools` (for `mkisofs`) and `pkgconf` (try-omarchy's runtime build
+  needs `pkg-config`, which Homebrew's qemu bottle does not leave behind):
 
   ```
-  brew install qemu cdrtools
+  brew install qemu cdrtools pkgconf
   ```
 
   Homebrew's own `qemu-system-aarch64` is not used: it has no GL display and

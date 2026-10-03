@@ -23,9 +23,21 @@
 # (~/.local/share/kdevm/runtime) KDEVM_STATE (~/.cache/kdevm). Everything
 # large lives outside the repo.
 set -euo pipefail
+umask 077   # overlay, vars store, sockets, logs: owner-only from creation
 
 REPO="$(cd "$(dirname "$0")" && pwd)"
-[[ -f "$HOME/.config/kdevm/env" ]] && source "$HOME/.config/kdevm/env"
+# ~/.config/kdevm/env holds defaults; an explicit environment variable wins.
+# Only KDEVM_* assignments are read; values may reference $HOME.
+kdevm_load_env() {
+  local f="$HOME/.config/kdevm/env" line k v; [[ -f "$f" ]] || return 0
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ "$line" =~ '^[[:space:]]*(export[[:space:]]+)?(KDEVM_[A-Z_]+)=(.*)$' ]] || continue
+    k="${match[2]}"; v="${match[3]}"
+    [[ -n "${(P)k:-}" ]] && continue
+    eval "export $k=$v"
+  done < "$f"
+}
+kdevm_load_env
 STATE="${KDEVM_STATE:-$HOME/.cache/kdevm}"
 RT="${KDEVM_RUNTIME_ROOT:-${XDG_DATA_HOME:-$HOME/.local/share}/kdevm/runtime}/current"
 QEMU="$RT/bin/qemu-system-aarch64"
@@ -56,8 +68,33 @@ SSH_OPTS=(-p "$SSH_PORT" -o UserKnownHostsFile="$KNOWN_HOSTS" -o StrictHostKeyCh
 die() { echo "kdevm: $*" >&2; exit 1; }
 log() { echo "== $*"; }
 
-qemu_pid() { [[ -f "$PIDFILE" ]] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null && cat "$PIDFILE" || true; }
+# A saved pid counts only if that pid is alive AND is our QEMU binary running
+# our overlay: after a crash or reboot the number can belong to anything.
+pid_is_ours() { [[ "$1" =~ ^[0-9]+$ ]] && ps -o command= -p "$1" 2>/dev/null | grep -F -q -- "$QEMU" && ps -o command= -p "$1" 2>/dev/null | grep -F -q -- "file=$WORK"; }
+qemu_pid() {
+  local pid; pid=$(cat "$PIDFILE" 2>/dev/null || true)
+  if [[ -n "$pid" ]] && pid_is_ours "$pid"; then echo "$pid"; else rm -f "$PIDFILE"; fi
+}
 running() { [[ -n "$(qemu_pid)" ]]; }
+bridge_pid() {
+  local pid; pid=$(cat "$BRIDGEPID" 2>/dev/null || true)
+  if [[ "$pid" =~ ^[0-9]+$ ]] && ps -o command= -p "$pid" 2>/dev/null | grep -q -- "kdevm"; then echo "$pid"; else rm -f "$BRIDGEPID"; fi
+}
+
+# (5) one lock per state directory for every state-changing verb. mkdir is
+# atomic; a lock whose holder is dead is reclaimed. guest/build.sh sees
+# KDEVM_LOCKED=1 and does not take it again.
+LOCK="$STATE/lock"
+take_lock() {
+  install -d -m 700 "$STATE"
+  if ! mkdir "$LOCK" 2>/dev/null; then
+    local holder; holder=$(cat "$LOCK/pid" 2>/dev/null || echo 0)
+    kill -0 "$holder" 2>/dev/null && die "another kdevm command is running (pid $holder); wait for it"
+    rm -rf "$LOCK"; mkdir "$LOCK" || die "cannot take the lock $LOCK"
+  fi
+  echo $$ > "$LOCK/pid"; export KDEVM_LOCKED=1
+  trap 'rm -rf "$LOCK"' EXIT
+}
 
 # QMP: one command, stdlib Python over the unix socket.
 qmp() {
@@ -123,15 +160,15 @@ ensure_factory() { [[ -f "$FACTORY" ]] || { log "factory missing; building (abou
 up() {
   ensure_runtime; ensure_factory
   if running; then log "already running (pid $(qemu_pid))"; return 0; fi
-  mkdir -p "$STATE" "$SHARE"; install -d -m 700 "$RUN"
+  install -d -m 700 "$STATE" "$RUN"; chmod 700 "$STATE"; mkdir -p "$SHARE"
   [[ -f "$WORK" ]] || { log "new overlay on the factory"; "$QEMU_IMG" create -q -f qcow2 -b "$FACTORY" -F qcow2 "$WORK"; }
   # Private UEFI variable store: a copy of the template, never the template.
   [[ -f "$EFIVARS" ]] || cp "$FW_VARS_TEMPLATE" "$EFIVARS"
+  chmod 600 "$WORK" "$EFIVARS" "$FACTORY" 2>/dev/null || true
   rm -f "$QMP" "$CLIP"
   # The helper's bridges accept only a socket owned by this uid with no
-  # group/other bits (NativeBridgeSocket.swift), so QEMU must create them
-  # under a private umask. Everything else it writes becomes private too.
-  umask 077
+  # group/other bits (NativeBridgeSocket.swift); the script-wide umask 077
+  # makes QEMU create them that way.
   local out_hz in_hz scale xres yres
   read -r xres yres < <(display_pixels)
   out_hz=$("$HELPER" --host-audio-frequency output 2>/dev/null || echo 48000)
@@ -195,7 +232,7 @@ up() {
 }
 
 down() {
-  running || { log "not running"; return 0; }
+  running || { bridge_pid >/dev/null; rm -f "$BRIDGEPID" "$PIDFILE"; log "not running"; return 0; }
   local pid; pid=$(qemu_pid)
   # Plasma's power manager owns the ACPI power button and does not shut down
   # on it (seen 2026-10-02: QMP system_powerdown, 30 s, nothing), so ask the
@@ -209,7 +246,7 @@ down() {
   fi
   for i in {1..45}; do kill -0 "$pid" 2>/dev/null || break; sleep 1; done
   if kill -0 "$pid" 2>/dev/null; then log "guest did not power off in 45 s; terminating"; kill "$pid"; sleep 2; kill -9 "$pid" 2>/dev/null || true; fi
-  [[ -f "$BRIDGEPID" ]] && { kill "$(cat "$BRIDGEPID")" 2>/dev/null || true; }
+  local bpid; bpid=$(bridge_pid); [[ -n "$bpid" ]] && { kill "$bpid" 2>/dev/null || true; }
   rm -f "$PIDFILE" "$BRIDGEPID" "$QMP" "$CLIP"
   log "stopped (overlay kept; 'up' resumes it)"
 }
@@ -266,7 +303,7 @@ status() {
   echo "-- config: $CPUS vCPU, ${MEM_MB} MB, scale $(scale_hint), share $SHARE"
   if running; then
     echo "-- qemu: pid $(qemu_pid), $(qmp query-status 2>/dev/null || echo 'QMP not answering')"
-    [[ -f "$BRIDGEPID" ]] && kill -0 "$(cat "$BRIDGEPID")" 2>/dev/null && echo "-- clipboard bridge: supervisor pid $(cat "$BRIDGEPID"), helper $(pgrep -f 'bridge-native-clipboard' | head -1 || echo not-running)"
+    [[ -n "$(bridge_pid)" ]] && echo "-- clipboard bridge: supervisor pid $(bridge_pid), helper $(pgrep -f 'bridge-native-clipboard' | head -1 || echo not-running)"
     if nc -z -G 2 localhost "$SSH_PORT" 2>/dev/null; then
       echo "-- ssh: localhost:$SSH_PORT answering"
       ssh "${SSH_OPTS[@]}" -o BatchMode=yes "$USER_NAME@localhost" \
@@ -277,12 +314,12 @@ status() {
 
 case "${1:-}" in
   runtime)   "$REPO/runtime/build.sh" "${@:2}" ;;
-  factory)   ensure_runtime; "$REPO/guest/build.sh" "${@:2}" ;;
-  up|launch) up ;;
-  preflight) preflight ;;
-  down)      down ;;
-  destroy)   destroy "${2:-}" ;;
-  rebuild)   rebuild ;;
+  factory)   take_lock; ensure_runtime; "$REPO/guest/build.sh" "${@:2}" ;;
+  up|launch) take_lock; up ;;
+  preflight) take_lock; preflight ;;
+  down)      take_lock; down ;;
+  destroy)   take_lock; destroy "${2:-}" ;;
+  rebuild)   take_lock; rebuild ;;
   status)    status ;;
   ssh)       ssh_guest "${@:2}" ;;
   console)   tail -n 50 -f "$SERIAL" ;;

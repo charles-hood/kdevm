@@ -22,5 +22,8 @@ Issues and pull requests are welcome. A few things that make them land:
 - **Guest changes go in the cloud-init template** (`guest/user-data.yaml.tmpl`)
   or `guest/files/`, never by hand in a running overlay: the factory is the
   source of truth and a `rebuild` must reproduce the fix.
-- Shell is zsh on macOS, bash inside the guest. `zsh -n` both before
-  pushing. No em dashes in prose.
+- Run `tests/checks.sh` before pushing. It is offline (no VM, no real
+  state touched) and covers syntax, password generation, the overlay guard,
+  stale-pid safety, locking, permissions and YAML rendering. The YAML probe
+  wants `python3 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt`.
+- Shell is zsh on macOS, bash inside the guest. No em dashes in prose.

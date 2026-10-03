@@ -55,6 +55,32 @@ else in their tree is touched. Rebuild took 88 s. The helper's own log line
 comes from `-name kdevm`. A rebuilt runtime has a new ad-hoc signature, so
 macOS re-asks the Microphone permission once.
 
+## 0.1.0 code review (Codex, 2026-10-02, commit 842c2fe)
+
+Seven findings, six rated release blockers, all confirmed and fixed; the
+probes are kept in `tests/checks.sh`.
+
+| # | finding | fix | validated by |
+|---|---|---|---|
+| 1 | `tr -dc ... < /dev/urandom \| head -c 20` exits 141 under pipefail, so a fresh install never created the password | Python `secrets`, no pipeline | isolated config: 20 chars, mode 600, reused on rerun |
+| 2 | `pkg-config` missing from the documented prerequisites; their build script requires it and Homebrew's qemu bottle does not leave it | `brew install qemu cdrtools pkgconf` | formula exists, 3.0.7 |
+| 3 | `factory --force` replaced the backing image under a live overlay | refuse while `work.qcow2` exists; `rebuild` drops it first | seeded empty overlay: refused before any write |
+| 4 | a saved pid was trusted on `kill -0` alone, so a reused pid could be killed | pid counts only if `ps` shows our QEMU on our overlay; bridge pid must show kdevm | sleeper pid in both files survived `down` and `status` |
+| 5 | no lock: two `up`s or an `up`/`destroy` pair could orphan a VM | `mkdir` lock per state dir across every verb and the factory build, dead holder reclaimed | live holder blocked; dead holder reclaimed; lock released |
+| 6 | state dir 0755, disks 0644, seed with the plaintext password kept on failure | `umask 077` first thing in both scripts, state 0700, disks and vars 0600, seed removed on every exit | audit after the rebuild (below) |
+| 7 | password inserted into YAML unquoted: `&secret` became null, `12345678` an integer | JSON-encode password and key (valid double-quoted scalars) | 13 hostile values parsed back identical by PyYAML |
+
+Audit after `destroy --all`, `factory`, `up` on the fixed scripts (23:05):
+`~/.cache/kdevm` 700, `run/` 700, `factory.qcow2`, `work.qcow2`,
+`efivars.fd` and the base image 600, sockets 700, no seed, lock, building
+or failed leftovers; factory 117 s; the baked `kdevm-hints.service` applied
+scale 2 on the first boot; clipboard and share round trips pass;
+`tests/checks.sh` all green.
+
+Found while validating: the config file `~/.config/kdevm/env` was sourced
+after the environment and overrode explicit variables. It is now read line
+by line and only fills variables that are unset.
+
 ## Rules that are easy to forget
 
 - `gic-version=3` is mandatory under HVF on this QEMU; it rejects GICv2.
@@ -80,7 +106,10 @@ Gotchas met on the way (2026-10-02):
 - `guest/build.sh` refuses to boot if any `@@` token survives rendering. The
   first run tripped on the template's own header comment, which named the
   token syntax. Rendering is done by Python with literal replacement, not
-  sed, so a password containing `&` or `|` cannot corrupt the YAML.
+  sed; since the 0.1.0 review the password and the ssh key are inserted as
+  JSON strings (valid YAML double-quoted scalars), so `&`, `|`, `#`, quotes
+  and all-digit passwords survive intact. Plain literal insertion did not:
+  a reviewer showed `&secret` parsing to null and `12345678` to an integer.
 - The provisioning boot under HVF reaches the initramfs in well under a
   second of guest time and answers ssh 16 s after launch; GROWROOT extends
   `/dev/vda1` to the 40 GB disk on the first boot (cloud-init growpart).

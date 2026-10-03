@@ -18,7 +18,18 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-[[ -f "$HOME/.config/kdevm/env" ]] && source "$HOME/.config/kdevm/env"
+# ~/.config/kdevm/env holds defaults; an explicit environment variable wins.
+# Only KDEVM_* assignments are read; values may reference $HOME.
+kdevm_load_env() {
+  local f="$HOME/.config/kdevm/env" line k v; [[ -f "$f" ]] || return 0
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ "$line" =~ '^[[:space:]]*(export[[:space:]]+)?(KDEVM_[A-Z_]+)=(.*)$' ]] || continue
+    k="${match[2]}"; v="${match[3]}"
+    [[ -n "${(P)k:-}" ]] && continue
+    eval "export $k=$v"
+  done < "$f"
+}
+kdevm_load_env
 PIN="$(tr -d '[:space:]' < "$REPO/runtime/pin.txt")"
 SCRATCH="${KDEVM_SCRATCH:-${KDEVM_STATE:-$HOME/.cache/kdevm}/build}"
 SRC="$SCRATCH/try-omarchy"

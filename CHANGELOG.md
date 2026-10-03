@@ -2,7 +2,29 @@
 
 ## 0.1.0 (2026-10-02)
 
-First release. One evening from empty directory to an accepted desktop.
+First release. One evening from empty directory to an accepted desktop,
+then an independent code review (Codex) with seven findings, all fixed
+before tagging:
+
+- first-run password generation no longer dies of SIGPIPE under pipefail
+  (Python `secrets` instead of a `tr | head` pipeline);
+- `pkgconf` added to the documented prerequisites (try-omarchy's build
+  needs `pkg-config`, which Homebrew's qemu bottle does not provide);
+- `factory --force` refuses while an overlay still backs the factory
+  (`rebuild` is the verb that drops it first);
+- saved pids are trusted only if the live process is our QEMU on our
+  overlay, so a reused pid can never be signalled;
+- one lock per state directory across every state-changing verb and the
+  factory build, with dead-holder reclaim;
+- `umask 077` from the first line of both scripts, state directory 0700,
+  disks and the UEFI vars 0600, the cloud-init seed (plaintext password)
+  removed on failure as well as success;
+- the guest password and ssh key are rendered as JSON strings (valid YAML
+  double-quoted scalars), so any password survives;
+- plus one found while validating: values in `~/.config/kdevm/env` are
+  defaults and an explicit environment variable now wins.
+
+`tests/checks.sh` keeps the review's probes runnable offline.
 
 - Runtime: try-omarchy's patched QEMU 11.1.1 (HVF, Cocoa + VirGL, libslirp,
   SDL duplex audio, virtio-9p) built by their own script from a pinned

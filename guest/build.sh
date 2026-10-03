@@ -12,9 +12,21 @@
 # password comes from KDEVM_PASS_FILE (default ~/.config/kdevm/password,
 # generated on first use). Optional config: ~/.config/kdevm/env.
 set -euo pipefail
+umask 077   # disks, seed (holds the plaintext password), vars: owner-only from creation
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-[[ -f "$HOME/.config/kdevm/env" ]] && source "$HOME/.config/kdevm/env"
+# ~/.config/kdevm/env holds defaults; an explicit environment variable wins.
+# Only KDEVM_* assignments are read; values may reference $HOME.
+kdevm_load_env() {
+  local f="$HOME/.config/kdevm/env" line k v; [[ -f "$f" ]] || return 0
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ "$line" =~ '^[[:space:]]*(export[[:space:]]+)?(KDEVM_[A-Z_]+)=(.*)$' ]] || continue
+    k="${match[2]}"; v="${match[3]}"
+    [[ -n "${(P)k:-}" ]] && continue
+    eval "export $k=$v"
+  done < "$f"
+}
+kdevm_load_env
 STATE="${KDEVM_STATE:-$HOME/.cache/kdevm}"
 RT="${KDEVM_RUNTIME_ROOT:-${XDG_DATA_HOME:-$HOME/.local/share}/kdevm/runtime}/current"
 QEMU="$RT/bin/qemu-system-aarch64"
@@ -46,20 +58,40 @@ log() { echo "== $(date +%H:%M:%S) $*"; }
 [[ -x "$QEMU_IMG" ]] || die "qemu-img missing (brew install qemu)"
 command -v mkisofs >/dev/null || die "mkisofs missing (brew install cdrtools)"
 [[ -f "$FW_CODE" && -f "$FW_VARS_TEMPLATE" ]] || die "edk2 firmware missing at $FW_CODE / $FW_VARS_TEMPLATE"
+[[ "$USER_NAME" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || die "KDEVM_USER must be a plain lowercase unix name: $USER_NAME"
 if [[ ! -f "$PASS_FILE" ]]; then
   # The guest user's password (sddm and sudo are passwordless anyway; this is
-  # for the lock screen and `su`). Generated once, kept private.
+  # for the lock screen and `su`). Generated once, kept private. Python, not a
+  # tr|head pipeline: under pipefail that pipeline exits 141 (SIGPIPE).
   install -d -m 700 "$(dirname "$PASS_FILE")"
-  LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 20 > "$PASS_FILE"; chmod 600 "$PASS_FILE"
+  python3 -c 'import secrets, string, sys; sys.stdout.write("".join(secrets.choice(string.ascii_letters + string.digits) for _ in range(20)))' > "$PASS_FILE"
+  chmod 600 "$PASS_FILE"
   echo "generated a guest password at $PASS_FILE (set KDEVM_PASS_FILE to use your own)"
 fi
+chmod 600 "$PASS_FILE" 2>/dev/null || true
 [[ -n "$SSH_PUB" && -f "$SSH_PUB" ]] || die "no ssh public key found; set KDEVM_SSH_PUB or run ssh-keygen -t ed25519"
 if [[ -f "$FACTORY" && "${1:-}" != --force ]]; then
   die "$FACTORY exists; use 'kdevm.sh rebuild' or --force"
 fi
+# An overlay keeps cluster references into the factory it was created on;
+# replacing the factory underneath it corrupts the guest. rebuild drops the
+# overlay first; a direct --force must not.
+[[ -f "$STATE/work.qcow2" ]] && die "an overlay ($STATE/work.qcow2) still backs the current factory; use 'kdevm.sh rebuild' (drops it) or 'kdevm.sh destroy' first"
 pgrep -qf "file=$STATE/(factory|work).qcow2" && die "a kdevm VM is running; 'kdevm.sh down' first"
 
-mkdir -p "$STATE"
+install -d -m 700 "$STATE"; chmod 700 "$STATE"
+# One lock per state directory, shared with kdevm.sh (which sets KDEVM_LOCKED
+# when it already holds it). mkdir is atomic; a dead holder's lock is reclaimed.
+LOCK="$STATE/lock"
+if [[ "${KDEVM_LOCKED:-}" != 1 ]]; then
+  if ! mkdir "$LOCK" 2>/dev/null; then
+    holder=$(cat "$LOCK/pid" 2>/dev/null || echo 0)
+    kill -0 "$holder" 2>/dev/null && die "another kdevm command is running (pid $holder)"
+    rm -rf "$LOCK"; mkdir "$LOCK" || die "cannot take the lock $LOCK"
+  fi
+  echo $$ > "$LOCK/pid"
+  trap 'rm -rf "$LOCK"' EXIT
+fi
 t0=$(date +%s)
 
 # ---- 1. base image, verified ------------------------------------------------
@@ -88,14 +120,16 @@ python3 - "$REPO/guest/user-data.yaml.tmpl" "$SEED_DIR/user-data" \
   "$V/omarchy-native-clipboard-bridge" "$V/omarchy-native-clipboard-bridge.service" \
   "$V/92-omarchy-native-clipboard.rules" "$V/90-try-omarchy-quantum.conf" \
   "$REPO/guest/files/firefox-policies.json" <<'PY'
-import base64, os, sys
+import base64, json, os, sys
 tmpl, out, agent, unit, udev, quantum, firefox = sys.argv[1:]
 b64 = lambda p: base64.b64encode(open(p, "rb").read()).decode()
 text = open(tmpl).read()
 for k, v in {
     "@@USER@@": os.environ["KDEVM_USER_NAME"],
-    "@@PASS@@": os.environ["KDEVM_PASS"],
-    "@@SSHKEY@@": os.environ["KDEVM_SSHKEY"],
+    # JSON strings are valid YAML double-quoted scalars: any password survives
+    # (&, |, #, a leading digit, quotes, backslashes).
+    "@@PASS@@": json.dumps(os.environ["KDEVM_PASS"]),
+    "@@SSHKEY@@": json.dumps(os.environ["KDEVM_SSHKEY"]),
     "@@B64_CLIPBOARD_AGENT@@": b64(agent),
     "@@B64_CLIPBOARD_UNIT@@": b64(unit),
     "@@B64_CLIPBOARD_UDEV@@": b64(udev),
@@ -132,8 +166,9 @@ log "booting headless for provisioning (serial: $SERIAL)"
 # romfile= : the runtime ships no option ROMs (no share/qemu), and the guest
 # boots from UEFI + disk, so no device needs one (try-omarchy does the same).
 QPID=$!
-# On any failure after boot, keep the disk for inspection as factory.qcow2.failed.
-trap 'kill $QPID 2>/dev/null; sleep 1; mv -f "$WORK" "$FACTORY.failed" 2>/dev/null; rm -f "$PROV_VARS"' EXIT
+# On any failure after boot: keep the disk for inspection as factory.qcow2.failed
+# (owner-only), remove the seed (it holds the plaintext password) and the vars.
+trap 'kill $QPID 2>/dev/null; sleep 1; mv -f "$WORK" "$FACTORY.failed" 2>/dev/null; rm -f "$PROV_VARS" "$STATE/seed.iso"; rm -rf "$SEED_DIR"; [[ "${KDEVM_LOCKED:-}" == 1 ]] || rm -rf "$LOCK"' EXIT
 
 # ---- 5. wait for ssh, then for cloud-init -----------------------------------
 log "waiting for ssh on localhost:$SSH_PORT"
@@ -219,9 +254,9 @@ log "powering off"
 ssh "${SSH_OPTS[@]}" "$USER_NAME@localhost" 'sudo cloud-init clean --logs; sync; sudo poweroff' 2>/dev/null || true
 for i in {1..60}; do kill -0 $QPID 2>/dev/null || break; sleep 1; done
 kill -0 $QPID 2>/dev/null && { echo "QEMU still up after 60 s; killing" >&2; kill $QPID; sleep 1; }
-trap - EXIT
+trap - EXIT; [[ "${KDEVM_LOCKED:-}" == 1 ]] || trap 'rm -rf "$LOCK"' EXIT
 rm -f "$PROV_VARS" "$STATE/seed.iso" "$KNOWN_HOSTS"; rm -rf "$SEED_DIR"
-mv "$WORK" "$FACTORY"
+mv "$WORK" "$FACTORY"; chmod 600 "$FACTORY"
 t2=$(date +%s)
 echo "factory time: $((t2 - t0)) s (ssh up at $(( t1 - t0 )) s incl. cloud-init)" >> "$INFO"
 log "factory ready: $FACTORY ($(du -h "$FACTORY" | cut -f1) on disk) in $((t2 - t0)) s"
