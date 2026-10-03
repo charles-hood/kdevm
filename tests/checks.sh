@@ -1,4 +1,4 @@
-#!/bin/zsh
+#!/bin/zsh -f
 # Offline checks for kdevm: no VM is started, the real state directory is
 # never touched (every probe uses a throwaway KDEVM_STATE under $TMPDIR).
 # These are the probes from the 0.1.0 code review, kept so they stay true.
@@ -190,16 +190,16 @@ exec /bin/ps "$@"
 EOF
 chmod +x "$T/fakebin2/ps"
 sleep 120 & SL4=$!; echo "$SL4 $(proc_start $SL4)" > "$T/v4f/qemu.pid"
-st=$(PATH="$T/fakebin2:$PATH" zsh -c "source $REPO/lib/kdevm-common.zsh; pid_state $SL4 'x' 'sleep*'")
+st=$(PATH="$T/fakebin2:$PATH" zsh -f -c "source $REPO/lib/kdevm-common.zsh; pid_state $SL4 'x' 'sleep*'")
 [[ "$st" == unknown ]] && pass "pid_state: start-time lookup failure after a matching command is unknown" || fail "pid_state start-time failure gave '$st'"
 cat > "$T/fakebin2/ps" <<'EOF'
 #!/bin/sh
 for a in "$@"; do [ "$a" = "lstart=" ] && exit 0; done
 exec /bin/ps "$@"
 EOF
-st=$(PATH="$T/fakebin2:$PATH" zsh -c "source $REPO/lib/kdevm-common.zsh; pid_state $SL4 'x' 'sleep*'")
+st=$(PATH="$T/fakebin2:$PATH" zsh -f -c "source $REPO/lib/kdevm-common.zsh; pid_state $SL4 'x' 'sleep*'")
 [[ "$st" == unknown ]] && pass "pid_state: empty start-time output is unknown" || fail "pid_state empty start gave '$st'"
-st=$(zsh -c "source $REPO/lib/kdevm-common.zsh; pid_state $SL4 'not-the-start' 'sleep*'")
+st=$(zsh -f -c "source $REPO/lib/kdevm-common.zsh; pid_state $SL4 'not-the-start' 'sleep*'")
 [[ "$st" == absent ]] && pass "pid_state: same command, different start time is absent (reused pid)" || fail "pid_state different start gave '$st'"
 kill $SL4 2>/dev/null; wait $SL4 2>/dev/null
 
@@ -207,8 +207,8 @@ kill $SL4 2>/dev/null; wait $SL4 2>/dev/null
 #     written in one zone is recognised from another (the Mac changes zone
 #     while the VM runs)
 sleep 120 & SL5=$!
-rec=$(TZ=Asia/Tokyo LC_ALL=fr_FR.UTF-8 zsh -c "source $REPO/lib/kdevm-common.zsh; proc_start $SL5")
-st=$(TZ=America/New_York LC_ALL=de_DE.UTF-8 zsh -c "source $REPO/lib/kdevm-common.zsh; pid_state $SL5 '$rec' 'sleep*'")
+rec=$(TZ=Asia/Tokyo LC_ALL=fr_FR.UTF-8 zsh -f -c "source $REPO/lib/kdevm-common.zsh; proc_start $SL5")
+st=$(TZ=America/New_York LC_ALL=de_DE.UTF-8 zsh -f -c "source $REPO/lib/kdevm-common.zsh; pid_state $SL5 '$rec' 'sleep*'")
 [[ -n "$rec" && "$st" == running ]] && pass "pid_state: a start time recorded in one time zone and locale is recognised in another" || fail "process identity across time zones (record '$rec' gave '$st')"
 kill $SL5 2>/dev/null; wait $SL5 2>/dev/null
 
@@ -441,7 +441,7 @@ fi
 
 # 8. config loader: any NAME=value is read, an explicit (even empty) variable wins
 mkdir -p "$T/home/.config/kdevm"; printf 'QEMU_IMG=/custom/qemu-img\nKDEVM_USER=fromfile\nKDEVM_MEM_MB=1234\n' > "$T/home/.config/kdevm/env"
-got=$(HOME="$T/home" KDEVM_USER= zsh -c "source $REPO/lib/kdevm-common.zsh; kdevm_load_env; print -r -- \"\${QEMU_IMG}|\${KDEVM_USER-unset}|\${KDEVM_MEM_MB}\"")
+got=$(HOME="$T/home" KDEVM_USER= zsh -f -c "source $REPO/lib/kdevm-common.zsh; kdevm_load_env; print -r -- \"\${QEMU_IMG}|\${KDEVM_USER-unset}|\${KDEVM_MEM_MB}\"")
 [[ "$got" == "/custom/qemu-img||1234" ]] && pass "config loader: non-KDEVM keys kept, explicit empty value respected" || fail "config loader ($got)"
 
 
@@ -480,7 +480,7 @@ QI="${QEMU_IMG:-/opt/homebrew/bin/qemu-img}"
 if [[ -x "$QI" ]]; then
   FRT="$T/fakert/current"; mkdir -p "$FRT/bin" "$T/v10"
   cat > "$FRT/bin/kdevm" <<'EOF'
-#!/bin/zsh
+#!/bin/zsh -f
 # fake QEMU: bind the QMP and clipboard sockets named on the command line, then hang
 qmp=""; clip=""
 for a in "$@"; do
@@ -540,7 +540,7 @@ QI="${QEMU_IMG:-/opt/homebrew/bin/qemu-img}"
 if [[ -x "$QI" ]] && command -v mkisofs >/dev/null; then
   F2="$T/fakert2/current/bin"; mkdir -p "$F2" "$T/v11"
   cat > "$F2/kdevm" <<'EOF'
-#!/bin/zsh
+#!/bin/zsh -f
 # fake provisioning QEMU: who launched me, is the lock held, then fail fast
 echo $PPID > "$KDEVM_STATE/fakeqemu.ppid"
 zmodload zsh/system
@@ -604,7 +604,7 @@ EOF
 for held in root scratch; do
   mkdir -p "$T/v12b/$held/rt" "$T/v12b/$held/scratch"
   [[ $held == root ]] && lf="$T/v12b/$held/rt/build.lock" || lf="$T/v12b/$held/scratch/build.lock"
-  zsh "$T/treeholder.zsh" "$REPO/lib/kdevm-common.zsh" "$lf" > "$T/v12b/$held/holder.out" 2>&1 & LH3=$!
+  zsh -f "$T/treeholder.zsh" "$REPO/lib/kdevm-common.zsh" "$lf" > "$T/v12b/$held/holder.out" 2>&1 & LH3=$!
   for i in {1..50}; do [[ "$(cat "$T/v12b/$held/holder.out" 2>/dev/null)" == held* ]] && break; sleep 0.1; done
   b12() { KDEVM_RUNTIME_ROOT="$T/v12b/$held/rt" KDEVM_SCRATCH="$T/v12b/$held/scratch" ./runtime/build.sh 2>&1; }
   out=$(b12); rc=$?

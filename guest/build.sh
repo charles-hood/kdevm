@@ -1,4 +1,4 @@
-#!/bin/zsh
+#!/bin/zsh -f
 # Build the kdevm factory image: Debian 13 generic arm64 cloud image + cloud-init
 # (guest/user-data.yaml.tmpl) booted ONCE headless under the kdevm runtime, then
 # checked and powered off. The result, ~/.cache/kdevm/factory.qcow2, is the

@@ -1,4 +1,4 @@
-#!/bin/zsh
+#!/bin/zsh -f
 # kdevm: the Debian 13 + KDE Plasma desktop as a GPU-accelerated QEMU VM on
 # this Mac, in a native window. Runtime: try-omarchy's patched QEMU (HVF,
 # Cocoa + VirGL, SLIRP, SDL duplex audio, virtio-9p) and its Swift helper for

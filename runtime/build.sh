@@ -1,4 +1,4 @@
-#!/bin/zsh
+#!/bin/zsh -f
 # Build the host runtime kdevm runs on: try-omarchy's patched QEMU (HVF +
 # Cocoa/VirGL + SLIRP + SDL duplex audio + virtio-9p) and its Swift helper
 # (omarchy-vm-helper), whose bridge modes run standalone beside our QEMU.

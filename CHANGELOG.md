@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+- **The scripts ignore your shell startup files.** `kdevm.sh`, both build
+  scripts and the checks now start as `/bin/zsh -f`. Before, a `~/.zshenv`
+  that defined aliases (`rm -i`, a coloured `grep`) or set options such as
+  `KSH_ARRAYS` or `NO_CLOBBER` changed how they ran; with those options
+  nothing ran at all. Found by running the checks under such a file; they
+  pass 98 of 98 with and without one.
+- **README rewritten for a first-time reader**: a screenshot, what you get
+  in plain words, what the first run asks of you, how to remove everything.
+  The internals moved under "How it works".
+
 ## 0.2.0 (2026-10-03)
 
 Three host integrations from the roadmap, a guest that can no longer strand

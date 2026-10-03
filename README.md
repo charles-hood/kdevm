@@ -1,81 +1,110 @@
 # kdevm
 
-**A Debian 13 + KDE Plasma 6 desktop as a GPU-accelerated VM on Apple Silicon,
-in a native Mac window.** QEMU on Apple's Hypervisor.framework, the guest's
-OpenGL replayed on the Apple GPU through VirGL, Plasma Wayland with KWin
-compositing, HiDPI, live window resize, sound out and microphone in, two-way
-clipboard (text and PNG), the Mac's time zone and battery, one shared Mac
-folder, ssh.
-No RDP client, no greeter, no Linux display driver to install.
+**A full Linux desktop, Debian 13 with KDE Plasma 6, in a window on your
+Apple Silicon Mac, drawn by the Mac's own GPU.** One command builds it and
+opens it. No RDP client, no login screen, no driver to install in Linux.
 
-The host runtime is [try-omarchy](https://github.com/omacom/try-omarchy)'s
-patched QEMU 11.1.1 (23 patches: Cocoa dynamic display, VirGL on native
-macOS OpenGL, HVF free-page memory reclaim, HDA audio recovery, precise
-trackpad scroll and pinch, 9p ownership mapping, and more), built by their
-own script from a pinned commit, plus their Swift helper for the clipboard,
-time zone and battery bridges. Everything Omarchy-, Arch- and Hyprland-specific is
-left behind. The
-guest is an ordinary Debian cloud image provisioned once by cloud-init into
-a factory image and run from a throwaway qcow2 overlay, so the VM stays
-disposable: factory = image, overlay = container.
-
-Built in one evening on an M4 Pro running macOS 27.0.1 and accepted on
-Chrome's own `chrome://gpu` page: native Wayland, hardware compositing,
-rasterization and WebGL on `virgl (Apple M4 Pro)`, no GPU-process crashes.
-
-## Numbers (M4 Pro, 4 vCPU, 8 GB, idle Plasma Wayland)
-
-| | |
-|---|---|
-| Runtime build (QEMU + VirGL + libslirp + helper) | 96 s + 21 s |
-| Factory image build (cloud-init, Plasma, both browsers, the battery module) | about 2 minutes (102 to 137 s over nine builds), 4.3 GB on disk |
-| Boot to a logged-in desktop | 14 s |
-| Clean power-off | 3 s |
-| Idle QEMU CPU | about 7% of one core (5.4% median) |
-| Charged memory at idle | 3.1 GB; a freed 2 GiB block in the guest came back to macOS within 25 s |
-| Live resize | the guest mode follows the window through the virtio-gpu EDID, no helper needed |
-
-Measured with try-omarchy's `profile-process.py`; method and provenance in
-[docs/runbook.md](docs/runbook.md). The factory row is current. Every other
-row was measured on 0.1.0, before the time zone and battery bridges and the
-power applet were added, and has not been measured again.
-
-## Requirements
-
-- Apple Silicon Mac, macOS 15 or newer (built and tested on 27.0.1).
-- Xcode or the Command Line Tools (clang, Swift 6, codesign).
-- Homebrew `qemu` (for `qemu-img` and the EDK II firmware files),
-  `cdrtools` (for `mkisofs`) and `pkgconf` (try-omarchy's runtime build
-  needs `pkg-config`, which Homebrew's qemu bottle does not leave behind):
-
-  ```
-  brew install qemu cdrtools pkgconf
-  ```
-
-  Homebrew's own `qemu-system-aarch64` is not used: it has no GL display and
-  no `virtio-gpu-gl` device. kdevm builds its own.
-- An ssh key pair (`ssh-keygen -t ed25519` if you have none).
-- About 1 GB of downloads on first build (pinned QEMU, VirGL, libslirp,
-  Homebrew bottles, the Debian cloud image, Google Chrome) and about 6 GB of
-  disk for the runtime, base image and factory.
-
-## Quick start
+![The Plasma desktop running in a Mac window](assets/screenshot.png)
 
 ```
-git clone https://github.com/charles-hood/kdevm.git ~/Projects/kdevm
-cd ~/Projects/kdevm
+brew install qemu cdrtools pkgconf
+git clone https://github.com/charles-hood/kdevm.git
+cd kdevm
 ./kdevm.sh up
 ```
 
-`up` builds whatever is missing: the runtime (about two minutes), then the
-factory image (about two minutes, a headless VM running cloud-init), then
-opens the window. Plasma logs in by itself. The first microphone use
-triggers a macOS permission prompt for the VM's binary, `kdevm`.
+The first `up` takes about five minutes (it builds the VM software and the
+Linux image). After that the desktop opens in about 15 seconds.
 
-Run `./kdevm.sh preflight` instead of `up` the first time if you want the
-graphics stack checked before Plasma touches it: it stops the display
-manager over ssh, runs `eglinfo` and `kmscube`, prints a verdict that names
-the layer at fault if anything is wrong, and starts the desktop.
+## What you get
+
+- **A GPU-accelerated desktop.** Plasma on Wayland with full compositing.
+  Chrome and Firefox are preinstalled, and Chrome runs with hardware
+  compositing and WebGL.
+- **A normal Mac window.** Drag to resize and the Linux desktop follows;
+  it is sharp on a Retina display; full screen is one setting away.
+- **Sound and microphone.**
+- **Copy and paste in both directions**, text and images.
+- **One shared folder**: `~/kdevm-share` on the Mac is `~/Mac` in Linux.
+- **The Mac's time zone and battery level**, shown by Plasma as on any
+  laptop.
+- **ssh into the desktop**: `./kdevm.sh ssh`.
+- **A disposable machine.** What you change survives `down` and `up`, and
+  `./kdevm.sh rebuild` gives you a factory-fresh desktop in about two
+  minutes. Keep anything that matters in the shared folder.
+- **Light when idle**: about 7% of one core, and memory Linux is not using
+  goes back to macOS (the measurements are under Numbers, below).
+
+## Before you start
+
+- An Apple Silicon Mac. kdevm was built and tested on one machine, an M4
+  Pro on macOS 27. The VM software underneath supports macOS 15 and newer
+  and other Apple Silicon Macs, but nobody has tried kdevm on them yet;
+  [reports are welcome](CONTRIBUTING.md).
+- Xcode or the Command Line Tools (`xcode-select --install`), for clang,
+  Swift 6 and codesign.
+- [Homebrew](https://brew.sh), in its usual place (`/opt/homebrew`), with
+  three packages: `brew install qemu cdrtools pkgconf`. They supply
+  `qemu-img`, the UEFI firmware files, `mkisofs` and `pkg-config`.
+  Homebrew's own QEMU cannot draw with the GPU, so kdevm builds its own
+  and uses Homebrew's only for those tools.
+- An ssh key pair (`ssh-keygen -t ed25519` if you have none).
+- About 1 GB of downloads on the first run and about 6 GB of disk.
+
+Your login shell does not matter. The scripts run under the zsh that ships
+with macOS (`/bin/zsh`) and ignore your shell startup files.
+
+## The first run
+
+```
+./kdevm.sh up
+```
+
+`up` builds whatever is missing, then opens the window:
+
+1. The VM software (a patched QEMU and a small helper), about two minutes.
+2. The Linux image (a headless VM installs Plasma and both browsers into a
+   Debian cloud image), about two minutes.
+3. The desktop. Plasma logs in by itself.
+
+macOS may ask for two permissions, both for the VM's program, `kdevm`:
+
+- **Microphone**, the first time something in Linux records.
+- **Accessibility**, so that Command key shortcuts go to Linux (as the Meta
+  key) while the window is focused. Without it they stay with macOS.
+
+Your terminal may also be asked for Accessibility: `up` uses it once to
+size the window. Everything works if you decline.
+
+The Linux user has your Mac login name. Its password, should a lock screen
+or a dialog ask, is in `~/.config/kdevm/password`.
+
+If the window opens but the desktop looks wrong, run `./kdevm.sh preflight`
+instead of `up`: it checks the graphics stack layer by layer over ssh,
+prints a verdict that names the layer at fault, and then starts the
+desktop. `./kdevm.sh status` is the first thing to run for any other
+problem.
+
+## Everyday use
+
+```
+kdevm.sh up          start the desktop (builds anything missing)
+kdevm.sh down        clean power-off (your changes are kept; up resumes them)
+kdevm.sh status      what is running, and the first diagnostic command
+kdevm.sh ssh [cmd]   ssh <user>@localhost:2222
+kdevm.sh rebuild     new factory image (fresh packages, fresh Chrome), new desktop
+kdevm.sh destroy     drop your changes (--all: the factory and base image too)
+```
+
+Less often:
+
+```
+kdevm.sh preflight   up + graphics preflight over ssh, prints a verdict
+kdevm.sh runtime     build/stage the QEMU runtime + helper (--force to rebuild)
+kdevm.sh factory     build the Debian factory image
+kdevm.sh launch      same as up
+kdevm.sh console     tail the guest serial log
+```
 
 ## Upgrading
 
@@ -90,21 +119,35 @@ again). The factory image is never rebuilt automatically: run
 `./kdevm.sh rebuild` to get guest-side changes (it replaces the overlay).
 [CHANGELOG.md](CHANGELOG.md) says which releases need which.
 
-## Verbs
+## Removing it
 
 ```
-kdevm.sh runtime     build/stage the QEMU runtime + helper (--force to rebuild)
-kdevm.sh factory     build the Debian factory image
-kdevm.sh up          start the desktop (builds anything missing)
-kdevm.sh launch      same as up
-kdevm.sh preflight   up + graphics preflight over ssh, prints a verdict
-kdevm.sh down        clean power-off (overlay state kept; up resumes it)
-kdevm.sh destroy     drop the overlay (--all: factory and base image too)
-kdevm.sh rebuild     new factory (fresh packages, fresh Chrome), new overlay
-kdevm.sh status      the first diagnostic command
-kdevm.sh ssh [cmd]   ssh <user>@localhost:2222
-kdevm.sh console     tail the guest serial log
+./kdevm.sh down
+rm -rf ~/.cache/kdevm ~/.local/share/kdevm ~/.config/kdevm
 ```
+
+Those three directories are everything kdevm writes: the images and logs,
+the built VM software, and the generated password with your settings. If
+you moved any of them with `KDEVM_STATE` or `KDEVM_RUNTIME_ROOT`, remove
+those paths instead. What is left is yours to keep or delete: the shared
+folder (`~/kdevm-share`), this checkout, and the three Homebrew packages.
+
+## What it is not
+
+- **Not remote.** The window exists on the Mac that runs the VM. For a
+  desktop reachable over a network, an xrdp container does that job with
+  near-zero idle cost; this project exists for the GPU.
+- **No hardware video decode.** VA-API fails by design on this stack; video
+  decodes on the CPU. Smooth 1080p is the bar, and it is met.
+- **Not a sandbox.** Guest sudo is passwordless (documented as temporary;
+  it bypasses PAM and would have to go for a Touch ID sudo integration).
+  The guest reaches the network through user-mode slirp; only ssh is
+  forwarded, to loopback.
+- **Not an app bundle.** It is started from a terminal, and the runtime is
+  ad-hoc signed, so a rebuilt runtime has a new identity and macOS re-asks
+  the microphone permission.
+- **Not a place to keep things.** The desktop is meant to be thrown away
+  and rebuilt; see the shared folder.
 
 ## Configuration
 
@@ -128,6 +171,25 @@ every script):
 | `KDEVM_STATE` | `~/.cache/kdevm` | base image, factory, overlay, UEFI vars, sockets, logs |
 | `KDEVM_DISK_GB` | 40 | sparse guest disk size |
 
+## Numbers (M4 Pro, 4 vCPU, 8 GB, idle Plasma Wayland)
+
+| | |
+|---|---|
+| Runtime build (QEMU + VirGL + libslirp + helper) | 96 s + 21 s |
+| Factory image build (cloud-init, Plasma, both browsers, the battery module) | about 2 minutes (102 to 137 s over nine builds), 4.3 GB on disk |
+| Boot to a logged-in desktop | 14 s |
+| Clean power-off | 3 s |
+| Idle QEMU CPU | about 7% of one core (5.4% median) |
+| Charged memory at idle | 3.1 GB; a freed 2 GiB block in the guest came back to macOS within 25 s |
+| Live resize | the guest mode follows the window through the virtio-gpu EDID, no helper needed |
+
+Measured with try-omarchy's `profile-process.py`; method and provenance in
+[docs/runbook.md](docs/runbook.md). The factory row is current. Every other
+row was measured on 0.1.0, before the time zone and battery bridges and the
+power applet were added, and has not been measured again. Chrome's own `chrome://gpu` page reports
+native Wayland, hardware compositing, rasterization and WebGL on
+`virgl (Apple M4 Pro)`, with no GPU-process crashes.
+
 ## Where things live
 
 | | |
@@ -138,6 +200,17 @@ every script):
 | `$KDEVM_SHARE/` | the one shared folder. An exchange folder, not a build tree. |
 
 ## How it works
+
+The host runtime is [try-omarchy](https://github.com/omacom/try-omarchy)'s
+patched QEMU 11.1.1 on Apple's Hypervisor.framework (23 patches: Cocoa
+dynamic display, VirGL on native macOS OpenGL, HVF free-page memory
+reclaim, HDA audio recovery, precise trackpad scroll and pinch, 9p
+ownership mapping, and more), built by their own script from a pinned
+commit, plus their Swift helper for the clipboard, time zone and battery
+bridges. Everything Omarchy-, Arch- and Hyprland-specific is left behind.
+The guest is an ordinary Debian cloud image provisioned once by cloud-init
+into a factory image and run from a throwaway qcow2 overlay, so the VM
+stays disposable: factory = image, overlay = container.
 
 ```
 Mac window (Cocoa, gl=on)  <-- virglrenderer <-- virtio-gpu-gl-pci <-- Mesa virgl <-- KWin Wayland
@@ -194,26 +267,12 @@ fw_cfg opt/kdevm/*         <-- per-launch hints (scale)                     <-- 
   next `down` and `up` bring it back. `down`
   asks the guest's systemd to power off over ssh (QMP's ACPI button does
   nothing useful under Plasma), QMP second, kill last.
-
-## What it is not
-
-- **Not remote.** The window exists on the Mac that runs the VM. For a
-  desktop reachable over a network, an xrdp container does that job with
-  near-zero idle cost; this project exists for the GPU.
-- **No hardware video decode.** VA-API fails by design on this stack; video
-  decodes on the CPU. Smooth 1080p is the bar, and it is met.
-- **Not a sandbox.** Guest sudo is passwordless (documented as temporary;
-  it bypasses PAM and would have to go for a Touch ID sudo integration).
-  The guest reaches the network through user-mode slirp; only ssh is
-  forwarded, to loopback.
-- **Fail-closed lifecycle.** One kernel advisory lock per state directory
+- **Fail-closed.** One kernel advisory lock per state directory
   (`zsystem flock`, stock zsh), held for the command's lifetime and released
   by the OS however the command ends, crash and SIGKILL included. A command
   that finds it held exits: another command is running. A VM whose process
   cannot be inspected is reported as UNKNOWN and no verb will touch it until
   you resolve it.
-- **Not an app bundle.** The runtime is ad-hoc signed, so a rebuilt
-  runtime has a new identity and macOS re-asks the microphone permission.
 
 ## Roadmap
 
