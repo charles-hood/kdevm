@@ -364,16 +364,20 @@ status() {
     echo "-- qemu: UNKNOWN: pid $(head -1 "$PIDFILE" | cut -d' ' -f1) is alive but could not be inspected; lifecycle verbs will refuse until this is resolved"
   elif running; then
     echo "-- qemu: pid $(qemu_pid), $(qmp query-status 2>/dev/null || echo 'QMP not answering')"
-    case "$(bridge_state)" in
-      running) echo "-- clipboard bridge: supervisor pid $(bridge_pid), helper $(pgrep -f 'bridge-native-clipboard' | head -1 || echo not-running)" ;;
-      unknown) echo "-- clipboard bridge: UNKNOWN: pid $(head -1 "$BRIDGEPID" | cut -d' ' -f1) could not be inspected; tracking preserved" ;;
-    esac
     if nc -z -G 2 localhost "$SSH_PORT" 2>/dev/null; then
       echo "-- ssh: localhost:$SSH_PORT answering"
       ssh "${SSH_OPTS[@]}" -o BatchMode=yes "$USER_NAME@localhost" \
         'echo "-- guest: $(uname -r), seat session $(loginctl show-session $(loginctl list-sessions --no-legend | awk "\$4==\"seat0\"{print \$1; exit}") -p Type --value 2>/dev/null || echo none), uptime $(uptime -p)"' 2>/dev/null || echo "-- guest: ssh not accepting the key yet"
     else echo "-- ssh: localhost:$SSH_PORT not answering"; fi
   else echo "-- qemu: not running"; fi
+  # The clipboard supervisor is reported independently of the QEMU state:
+  # running (no change), unknown (record preserved, nothing signalled),
+  # absent (bridge_pid drops the stale record; nothing to report).
+  case "$(bridge_state)" in
+    running) echo "-- clipboard bridge: supervisor pid $(bridge_pid), helper $(pgrep -f 'bridge-native-clipboard' | head -1 || echo not-running)" ;;
+    unknown) echo "-- clipboard bridge: UNKNOWN: pid $(head -1 "$BRIDGEPID" | cut -d' ' -f1) could not be inspected; tracking preserved, nothing signalled" ;;
+    absent)  bridge_pid >/dev/null ;;
+  esac
 }
 
 case "${1:-}" in
