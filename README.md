@@ -87,6 +87,7 @@ kdevm.sh rebuild     new factory (fresh packages, fresh Chrome), new overlay
 kdevm.sh status      the first diagnostic command
 kdevm.sh ssh [cmd]   ssh <user>@localhost:2222
 kdevm.sh console     tail the guest serial log
+kdevm.sh unlock      remove a stale lock left by a crashed command (refuses while its owner runs)
 ```
 
 ## Configuration
@@ -162,6 +163,11 @@ fw_cfg opt/kdevm/*         <-- per-launch hints (scale)                     <-- 
   it bypasses PAM and would have to go for a Touch ID sudo integration).
   The guest reaches the network through user-mode slirp; only ssh is
   forwarded, to loopback.
+- **Fail-closed lifecycle.** One lock per state directory. A command
+  that finds the lock held exits and names the owner; a crashed command
+  leaves its lock for you to remove with `kdevm.sh unlock`, which refuses
+  while the owner is alive. A VM whose process cannot be inspected is
+  reported as UNKNOWN and no verb will touch it until you resolve it.
 - **Not an app bundle.** The runtime is ad-hoc signed, so a rebuilt
   runtime has a new identity and macOS re-asks the microphone permission.
 

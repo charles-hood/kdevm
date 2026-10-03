@@ -122,6 +122,26 @@ Live, after the refactor: `down` (ssh), lock released, `up` tracked and
 QMP answering, duplicate `up` refused, supervisor visible as
 `kdevm-bridge-supervisor <qemu pid>` with its start time recorded, one QEMU.
 
+### Fourth pass (Codex, commit 94b1659): three items, and a design decision
+
+Codex found that the 30 s marker timeout could still admit two owners (a
+claimant paused past the timeout), that a failed or empty start-time lookup
+after a matching command returned `absent` instead of `unknown`, and that a
+failed start-time capture right after launch exited under `set -e` before
+the child was terminated. Charles's decision on the first: do not make the
+takeover more sophisticated; delete it. The lock is now **fail-closed**:
+acquisition is the atomic rename of a pid-bearing directory; if a lock
+exists the command exits, naming the live owner or, for a dead owner, the
+`kdevm.sh unlock` verb, which removes a lock only after verifying its owner
+is not running. No markers, no timeouts. An empty directory at the lock
+path has no owner and is replaced atomically. The other two: `pid_state`
+returns `unknown` for a failed or empty start-time lookup and `absent` only
+for a successfully inspected different identity; `up` terminates its child
+(TERM, wait, KILL) when it cannot record the start time, and stops an
+untrackable supervisor rather than leaving it. Probes added for each
+(fake `ps` that fails only `lstart=`, launch with that `ps`, unlock with a
+live and a dead owner); 34 checks pass.
+
 ## Rules that are easy to forget
 
 - `gic-version=3` is mandatory under HVF on this QEMU; it rejects GICv2.

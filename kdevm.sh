@@ -15,6 +15,7 @@
 #   kdevm.sh status      the first diagnostic command
 #   kdevm.sh ssh [cmd]   ssh into the guest on localhost:2222
 #   kdevm.sh console     tail the guest serial log
+#   kdevm.sh unlock      remove a stale lock left by a crashed command (refuses if its owner runs)
 #
 # Config: environment variables, optionally set in ~/.config/kdevm/env
 # (sourced if present). KDEVM_CPUS (4) KDEVM_MEM_MB (8192) KDEVM_SCALE
@@ -177,8 +178,16 @@ up() {
     -qmp "unix:$QMP,server=on,wait=off" -serial "file:$SERIAL" -monitor none \
     >"$STATE/qemu.out" 2>&1 &
   local pid=$! start
-  start=$(proc_start $pid)
-  [[ -n "$start" ]] || { kill $pid 2>/dev/null || true; die "could not record QEMU's start time; aborted"; }
+  # The child is ours from this moment: any failure to record its identity
+  # terminates it (TERM, wait, KILL) before the command exits.
+  start=$(proc_start $pid) || start=""
+  if [[ -z "$start" ]]; then
+    kill $pid 2>/dev/null || true
+    for i in {1..25}; do kill -0 $pid 2>/dev/null || break; sleep 0.2; done
+    kill -0 $pid 2>/dev/null && { kill -9 $pid 2>/dev/null || true; sleep 0.5; }
+    rm -f "$QMP" "$CLIP"
+    die "could not record QEMU's start time (process inspection failed); the launched QEMU (pid $pid) was terminated"
+  fi
   echo "$pid $start" > "$PIDFILE"
   for i in {1..100}; do [[ -S "$QMP" && -S "$CLIP" ]] && break; kill -0 $pid 2>/dev/null || break; sleep 0.1; done
   # The sockets appear before the disks are opened, so their existence proves
@@ -214,7 +223,15 @@ up() {
       kill -0 "$qpid" 2>/dev/null && sleep 1
     done' kdevm-bridge-supervisor "$HELPER" "$pid" "$CLIP" "$STATE/clipboard-bridge.log" </dev/null >/dev/null 2>&1 &
   local spid=$! sstart
-  sstart=$(proc_start $spid); [[ -n "$sstart" ]] && echo "$spid $sstart" > "$BRIDGEPID"
+  sstart=$(proc_start $spid) || sstart=""
+  if [[ -n "$sstart" ]]; then
+    echo "$spid $sstart" > "$BRIDGEPID"
+  else
+    # An untrackable supervisor is not left behind: stop it; the desktop
+    # keeps running without the clipboard bridge and status says so.
+    kill $spid 2>/dev/null || true; rm -f "$BRIDGEPID"
+    log "warning: could not record the clipboard supervisor's start time; bridge stopped (clipboard sharing off this session)"
+  fi
   # Window size: KScreen restores the guest's last mode and the Cocoa window
   # follows the guest, so the first window can come up small (492x277 points
   # seen). Once the window exists, size it to the display minus margins; the
@@ -335,6 +352,7 @@ case "${1:-}" in
   status)    status ;;
   ssh)       ssh_guest "${@:2}" ;;
   console)   tail -n 50 -f "$SERIAL" ;;
+  unlock)    unlock ;;
   _lockprobe) take_lock; echo "held"; sleep "${2:-3}" ;;   # for tests/checks.sh: hold the lock for N seconds
-  *) echo "usage: kdevm.sh {runtime|factory|up|launch|preflight|down|destroy [--all]|rebuild|status|ssh [cmd]|console}"; exit 1 ;;
+  *) echo "usage: kdevm.sh {runtime|factory|up|launch|preflight|down|destroy [--all]|rebuild|status|ssh [cmd]|console|unlock}"; exit 1 ;;
 esac

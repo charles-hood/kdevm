@@ -35,20 +35,25 @@ read_pidfile() {
 }
 # pid_state PID START PATTERN -> running | unknown | absent
 #   running: alive, command matches the zsh glob PATTERN, started at START
-#   absent:  no such process, or a different process now owns that number,
-#            or the record has no start time (an unverifiable record is
-#            never treated as ours)
+#   absent:  no such process, or a successfully inspected process that is a
+#            different identity (other command, or same command but another
+#            start time), or a record with no start time (an unverifiable
+#            record is never treated as ours)
 #   unknown: the process exists but could not be inspected (permission, ps
-#            failure); callers must neither signal it nor assume it is gone
+#            failure, empty output from either lookup); callers must neither
+#            signal it nor assume it is gone
 pid_state() {
-  local pid=$1 start=$2 pat=$3 cmd err
+  local pid=$1 start=$2 pat=$3 cmd err live
   [[ "$pid" =~ ^[1-9][0-9]*$ && -n "$start" ]] || { echo absent; return 0; }
   if ! err=$(kill -0 "$pid" 2>&1); then
     [[ "$err" == *ermitted* ]] && echo unknown || echo absent; return 0
   fi
   cmd=$(proc_cmd "$pid") || { echo unknown; return 0; }
   [[ -n "$cmd" ]] || { echo unknown; return 0; }
-  if [[ "$cmd" == ${~pat} && "$(proc_start "$pid")" == "$start" ]]; then echo running; else echo absent; fi
+  [[ "$cmd" == ${~pat} ]] || { echo absent; return 0; }
+  live=$(proc_start "$pid") || { echo unknown; return 0; }
+  [[ -n "$live" ]] || { echo unknown; return 0; }
+  [[ "$live" == "$start" ]] && echo running || echo absent
 }
 
 # ---- lock ------------------------------------------------------------------
@@ -56,43 +61,40 @@ pid_state() {
 # and by the factory build (which skips it when KDEVM_LOCKED=1 says the
 # caller already holds it). Acquisition is one atomic rename of a directory
 # that already contains the owner pid, so the lock never exists without its
-# owner recorded. A lock whose owner is dead is taken over by exactly one
-# contender: the one whose mkdir of a marker inside the lock succeeds; it
-# re-reads the owner after winning (a live owner may have replaced the lock
-# meanwhile) and backs off if the owner is alive. A marker abandoned by a
-# contender that died is honoured for 30 s, then the lock counts as stale.
+# owner recorded. FAIL-CLOSED: if the lock exists, the command exits, whether
+# the owner is alive (wait for it) or gone (a crash left it: run
+# `kdevm.sh unlock`, which removes it only after verifying the owner is not
+# running). There is no automatic takeover. An EMPTY directory at the lock
+# path has no owner and is not a lock: rename(2) replaces it atomically, and
+# only one contender's rename can win.
 lock_owner() { cat "$LOCK/pid" 2>/dev/null || true; }
 holder_alive() { [[ "$1" =~ ^[1-9][0-9]*$ ]] && kill -0 "$1" 2>/dev/null; }
 take_lock() {
-  local attempt holder tmp age
+  local holder tmp
   install -d -m 700 "$STATE"
   LOCK="${LOCK:-$STATE/lock}"
-  for attempt in {1..50}; do
-    tmp="$LOCK.new.$$"; rm -rf "$tmp"
-    mkdir -m 700 "$tmp" && echo $$ > "$tmp/pid"
-    if python3 -c 'import os, sys; os.rename(sys.argv[1], sys.argv[2])' "$tmp" "$LOCK" 2>/dev/null; then
-      KDEVM_LOCK_HELD=1; export KDEVM_LOCKED=1; return 0
-    fi
-    rm -rf "$tmp"
-    holder=$(lock_owner)
-    holder_alive "$holder" && die "another kdevm command is running (pid $holder); wait for it"
-    if mkdir "$LOCK/takeover" 2>/dev/null; then
-      holder=$(lock_owner)
-      if holder_alive "$holder"; then
-        rmdir "$LOCK/takeover" 2>/dev/null
-        die "another kdevm command is running (pid $holder); wait for it"
-      fi
-      rm -rf "$LOCK"
-    elif [[ -d "$LOCK/takeover" ]]; then
-      age=$(( $(date +%s) - $(stat -f %m "$LOCK/takeover" 2>/dev/null || date +%s) ))
-      (( age > 30 )) && rm -rf "$LOCK"
-    fi
-    sleep 0.2
-  done
-  die "cannot take the lock $LOCK (owner pid $(lock_owner))"
+  tmp="$LOCK.new.$$"; rm -rf "$tmp"
+  mkdir -m 700 "$tmp" && echo $$ > "$tmp/pid"
+  if python3 -c 'import os, sys; os.rename(sys.argv[1], sys.argv[2])' "$tmp" "$LOCK" 2>/dev/null; then
+    KDEVM_LOCK_HELD=1; export KDEVM_LOCKED=1; return 0
+  fi
+  rm -rf "$tmp"
+  holder=$(lock_owner)
+  if holder_alive "$holder"; then
+    die "another kdevm command is running (pid $holder); wait for it"
+  fi
+  die "stale lock at $LOCK (owner pid '${holder:-?}' is not running); check nothing of kdevm's is still running, then: kdevm.sh unlock"
 }
 # Only the process that took the lock releases it, and only if it still owns it.
 release_lock() { [[ -n "${KDEVM_LOCK_HELD:-}" && "$(lock_owner)" == "$$" ]] && rm -rf "$LOCK"; return 0; }
+# Explicit stale-lock recovery: refuses while the recorded owner is alive.
+unlock() {
+  LOCK="${LOCK:-$STATE/lock}"
+  [[ -d "$LOCK" ]] || { log "no lock at $LOCK"; return 0; }
+  local holder; holder=$(lock_owner)
+  holder_alive "$holder" && die "lock owner pid $holder is still running; not removing $LOCK"
+  rm -rf "$LOCK"; log "removed stale lock $LOCK (owner pid '${holder:-?}' not running)"
+}
 
 # ---- QMP -------------------------------------------------------------------
 # qmp COMMAND: one command over the unix socket $QMP. Prints the "return"

@@ -87,15 +87,43 @@ out=$(PATH="$T/fakebin:$PATH" KDEVM_STATE="$T/v4e" ./kdevm.sh status 2>&1)
 [[ "$out" == *UNKNOWN* ]] && pass "status reports UNKNOWN when inspection fails" || fail "status on inspection failure"
 kill $SL3 2>/dev/null; wait $SL3 2>/dev/null
 
-# 5. lock (finding 5): live holder blocks, dead holder is reclaimed, lock released after
+# 4f. command inspection succeeds but the start-time lookup fails or is empty: unknown, not absent
+mkdir -p "$T/v4f" "$T/fakebin2"
+cat > "$T/fakebin2/ps" <<'EOF'
+#!/bin/sh
+# answers -o command= normally, fails -o lstart=
+for a in "$@"; do [ "$a" = "lstart=" ] && exit 1; done
+exec /bin/ps "$@"
+EOF
+chmod +x "$T/fakebin2/ps"
+sleep 120 & SL4=$!; echo "$SL4 $(ps -o lstart= -p $SL4 | awk '{$1=$1; print}')" > "$T/v4f/qemu.pid"
+st=$(PATH="$T/fakebin2:$PATH" zsh -c "source $REPO/lib/kdevm-common.zsh; pid_state $SL4 'x' 'sleep*'")
+[[ "$st" == unknown ]] && pass "pid_state: start-time lookup failure after a matching command is unknown" || fail "pid_state start-time failure gave '$st'"
+cat > "$T/fakebin2/ps" <<'EOF'
+#!/bin/sh
+for a in "$@"; do [ "$a" = "lstart=" ] && exit 0; done
+exec /bin/ps "$@"
+EOF
+st=$(PATH="$T/fakebin2:$PATH" zsh -c "source $REPO/lib/kdevm-common.zsh; pid_state $SL4 'x' 'sleep*'")
+[[ "$st" == unknown ]] && pass "pid_state: empty start-time output is unknown" || fail "pid_state empty start gave '$st'"
+st=$(zsh -c "source $REPO/lib/kdevm-common.zsh; pid_state $SL4 'not-the-start' 'sleep*'")
+[[ "$st" == absent ]] && pass "pid_state: same command, different start time is absent (reused pid)" || fail "pid_state different start gave '$st'"
+kill $SL4 2>/dev/null; wait $SL4 2>/dev/null
+
+# 5. lock (finding 5): fail-closed, no automatic takeover
 mkdir -p "$T/v5/lock"; sleep 120 & H=$!; echo $H > "$T/v5/lock/pid"
 out=$(KDEVM_STATE="$T/v5" ./kdevm.sh down 2>&1); rc=$?
 [[ $rc -ne 0 && "$out" == *"another kdevm command"* ]] && pass "lock held by a live process blocks" || fail "lock held by a live process (rc=$rc)"
+out=$(KDEVM_STATE="$T/v5" ./kdevm.sh unlock 2>&1); rc=$?
+[[ $rc -ne 0 && -d "$T/v5/lock" ]] && pass "unlock refuses while the owner is alive" || fail "unlock removed a live owner's lock (rc=$rc)"
 kill $H 2>/dev/null; wait $H 2>/dev/null
 echo 999999 > "$T/v5/lock/pid"
+out=$(KDEVM_STATE="$T/v5" ./kdevm.sh down 2>&1); rc=$?
+[[ $rc -ne 0 && "$out" == *"stale lock"* && "$out" == *unlock* && -d "$T/v5/lock" ]] && pass "stale lock (dead owner): command refuses and names unlock, lock untouched" || fail "stale lock handling (rc=$rc: $out)"
+out=$(KDEVM_STATE="$T/v5" ./kdevm.sh unlock 2>&1); rc=$?
+[[ $rc -eq 0 && ! -d "$T/v5/lock" ]] && pass "unlock removes a lock whose owner is gone" || fail "unlock with dead owner (rc=$rc)"
 KDEVM_STATE="$T/v5" ./kdevm.sh down >/dev/null 2>&1; rc=$?
-[[ $rc -eq 0 && ! -d "$T/v5/lock" ]] && pass "dead lock holder reclaimed and lock released" || fail "dead lock reclaim (rc=$rc)"
-
+[[ $rc -eq 0 && ! -d "$T/v5/lock" ]] && pass "command runs after unlock and releases its lock" || fail "post-unlock run (rc=$rc)"
 # 5b. the lock must cover the whole operation and overlapping commands must serialise
 mkdir -p "$T/v5b"
 KDEVM_STATE="$T/v5b" ./kdevm.sh _lockprobe 3 > "$T/v5b/a.out" 2>&1 &
@@ -105,23 +133,12 @@ KDEVM_STATE="$T/v5b" ./kdevm.sh _lockprobe 3 > "$T/v5b/b.out" 2>&1; rcB=$?
 wait $A; rcA=$?
 if [[ $rcA -eq 0 && $rcB -ne 0 && "$(cat "$T/v5b/a.out")" == held && "$(cat "$T/v5b/b.out")" == *"another kdevm command"* ]]; then pass "overlapping commands: exactly one held the lock, the other was refused"; else fail "overlapping commands (A=$rcA B=$rcB)"; fi
 [[ ! -d "$T/v5b/lock" ]] && pass "lock released after the holder exited" || fail "lock left behind after exit"
-# 5c. exclusive stale-lock takeover: two contenders against one dead holder
-mkdir -p "$T/v5c/lock"; echo 999999 > "$T/v5c/lock/pid"
-KDEVM_STATE="$T/v5c" ./kdevm.sh _lockprobe 2 > "$T/v5c/a.out" 2>&1 & A=$!
-KDEVM_STATE="$T/v5c" ./kdevm.sh _lockprobe 2 > "$T/v5c/b.out" 2>&1 & B=$!
-wait $A; rcA=$?; wait $B; rcB=$?
-n=$(cat "$T/v5c/a.out" "$T/v5c/b.out" | grep -c '^held$')
-[[ $n -eq 1 ]] && pass "stale lock taken over by exactly one of two contenders" || fail "stale lock takeover: $n holders (A=$rcA B=$rcB)"
-
-# 5d. an abandoned takeover marker (dead contender) does not wedge the lock forever
-mkdir -p "$T/v5d/lock/takeover"; echo 999999 > "$T/v5d/lock/pid"; touch -t 202001010000 "$T/v5d/lock/takeover"
-out=$(KDEVM_STATE="$T/v5d" ./kdevm.sh _lockprobe 0 2>&1); rc=$?
-[[ $rc -eq 0 && "$out" == held ]] && pass "stale lock with an abandoned takeover marker recovered" || fail "abandoned marker (rc=$rc: $out)"
-# 5e. a fresh marker inside a LIVE owner's lock must not let a contender steal it
-mkdir -p "$T/v5e/lock/takeover"; sleep 120 & LH=$!; echo $LH > "$T/v5e/lock/pid"
-out=$(KDEVM_STATE="$T/v5e" ./kdevm.sh _lockprobe 0 2>&1); rc=$?
-[[ $rc -ne 0 && -d "$T/v5e/lock" && "$(cat "$T/v5e/lock/pid")" == "$LH" ]] && pass "live owner's lock not stolen despite a takeover marker" || fail "live owner stolen (rc=$rc)"
-kill $LH 2>/dev/null; wait $LH 2>/dev/null
+# 5c. an EMPTY directory at the lock path has no owner and is not a lock:
+#     rename(2) replaces it atomically (only one contender can win), so the
+#     command proceeds and releases normally
+mkdir -p "$T/v5c/lock"
+out=$(KDEVM_STATE="$T/v5c" ./kdevm.sh down 2>&1); rc=$?
+[[ $rc -eq 0 && ! -d "$T/v5c/lock" ]] && pass "empty directory at the lock path: replaced atomically, released after" || fail "empty lock dir (rc=$rc)"
 # 5f. a lock-refused factory build must not touch the active build's seed
 mkdir -p "$T/v5f/lock"; sleep 120 & LH2=$!; echo $LH2 > "$T/v5f/lock/pid"; printf 'seed' > "$T/v5f/seed.iso"
 out=$(KDEVM_STATE="$T/v5f" ./guest/build.sh 2>&1); rc=$?
@@ -213,6 +230,16 @@ EOF
   out=$(KDEVM_STATE="$T/v10" KDEVM_RUNTIME_ROOT="$T/fakert" KDEVM_FW_CODE="$T/v10/code.fd" KDEVM_FW_VARS="$T/v10/vars.fd" KDEVM_SHARE="$T/v10/share" KDEVM_WINDOW=keep ./kdevm.sh up 2>&1); rc=$?
   left=$(pgrep -f "$FRT/bin/qemu-system-aarch64" || true)
   if [[ $rc -ne 0 && -z "$left" && ! -e "$T/v10/qemu.pid" && "$out" == *"failed to start"* ]]; then pass "failed readiness: fake QEMU terminated, non-zero exit, no pid file"; else fail "failed readiness (rc=$rc, leftover='$left')"; [[ -n "$left" ]] && kill $left 2>/dev/null; fi
+  # 10b. start-time capture fails right after launch: the child is terminated, not orphaned
+  rm -rf "$T/v10/run" "$T/v10/work.qcow2" "$T/v10/vars.fd"; : > "$T/v10/vars.fd"
+  cat > "$T/fakebin2/ps" <<'EOF'
+#!/bin/sh
+for a in "$@"; do [ "$a" = "lstart=" ] && exit 1; done
+exec /bin/ps "$@"
+EOF
+  out=$(PATH="$T/fakebin2:$PATH" KDEVM_STATE="$T/v10" KDEVM_RUNTIME_ROOT="$T/fakert" KDEVM_FW_CODE="$T/v10/code.fd" KDEVM_FW_VARS="$T/v10/vars.fd" KDEVM_SHARE="$T/v10/share" KDEVM_WINDOW=keep ./kdevm.sh up 2>&1); rc=$?
+  left=$(pgrep -f "$FRT/bin/qemu-system-aarch64" || true)
+  if [[ $rc -ne 0 && -z "$left" && ! -e "$T/v10/qemu.pid" && "$out" == *"start time"* ]]; then pass "launch-time start capture failure: child terminated, no pid file"; else fail "start capture failure (rc=$rc, leftover='$left')"; [[ -n "$left" ]] && kill $left 2>/dev/null; fi
 else
   echo "SKIP  failed-readiness probe (no qemu-img)"
 fi
