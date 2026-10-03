@@ -427,6 +427,29 @@ What it turned up:
   (`chardev-add`, then `device_add virtserialport`), which works on the
   running bus and is a quick way to try the next bridge.
 
+## 0.2.0 review, discovery pass one (Codex, commit 5763b80)
+
+Read-only review of `v0.1.0..5763b80`. Five blockers, four should-fix. Each
+was checked here before anything was changed.
+
+| # | finding | checked how | disposition |
+|---|---|---|---|
+| 1 | updating with a 0.1 VM running: `destroy`/`rebuild` unlink the live overlay | reproduced on 5763b80 with a 0.1-style record and a live process: overlay removed | fixed: `refuse_if_stray` in `down` (so `destroy` and `rebuild` inherit it) and `up`; fixed-string match on the process table |
+| 2 | UPower shuts the guest down at a critical battery level | reproduced: 1% discharging, powered off after 22 s; `GetCriticalAction` said `PowerOff` | fixed: `CriticalPowerAction=Ignore` in `UPower.conf`, checked by the factory build; still up after 80 s live and on a cold boot of a rebuilt factory |
+| 3 | supervisor can signal a reused helper pid | by reading: the helper table holds bare pids | open: design decision (the supervisor itself) |
+| 4 | supervisor exit taken as proof its helpers ended | by reading | open: same decision |
+| 5 | concurrent runtime builds can stage `kdevm` beside an unrebranded helper | by reading; needs two builds at once | fixed: `zsystem flock` on the runtime root and on the scratch checkout |
+| 6 | `KDEVM_TIMEZONE` validated after the runtime and factory builds | by reading | fixed: validated first |
+| 7 | battery seed check runs when PyYAML is absent | by reading | fixed: inside the conditional |
+| 8 | helper lookup for `status` is a regex over the socket path | by reading | open: goes away or is fixed with 3 and 4 |
+| 9 | Dock icon temp file shared by state directories on one runtime | by reading; cosmetic | fixed: per-process name |
+
+- UPower 1.90.9 does not read `/etc/UPower/UPower.conf.d/`: a drop-in there
+  changed nothing (`GetCriticalAction` still `PowerOff`). The main file has
+  to be edited, and `Ignore` needs `AllowRiskyCriticalPowerAction=true`.
+- A battery state can be written to the module by hand for tests: stop the
+  agent, then one line to `/sys/devices/platform/try-omarchy-battery/state`.
+
 ## Rules that are easy to forget
 
 - Never let the guest sleep: on this machine type it cannot be woken. Sleep

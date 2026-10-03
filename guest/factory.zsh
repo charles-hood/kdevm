@@ -205,6 +205,9 @@ has snd_hda_intel  CONFIG_SND_HDA_INTEL
 has qemu_fw_cfg    CONFIG_FW_CFG_SYSFS
 # the battery module is ours to build (DKMS, guest/vendor/try-omarchy-battery)
 if /usr/sbin/modinfo -k "$krel" -n try_omarchy_battery >/dev/null 2>&1; then echo "ok   try_omarchy_battery (DKMS)"; else echo "FAIL try_omarchy_battery (DKMS did not build it for $krel)"; fail=1; fi
+# nothing in the guest may act on the mirrored battery, and the guest may not sleep
+if grep -qx 'CriticalPowerAction=Ignore' /etc/UPower/UPower.conf && grep -qx 'AllowRiskyCriticalPowerAction=true' /etc/UPower/UPower.conf; then echo "ok   UPower critical action: Ignore"; else echo "FAIL UPower would act on a critical battery ($(grep -E '^(CriticalPowerAction|AllowRisky)' /etc/UPower/UPower.conf | tr '\n' ' '))"; fail=1; fi
+if [ "$(busctl call org.freedesktop.login1 /org/freedesktop/login1 org.freedesktop.login1.Manager CanSuspend 2>/dev/null)" = 's "no"' ]; then echo "ok   sleep disabled (logind CanSuspend=no)"; else echo "FAIL the guest can sleep (logind CanSuspend is not no)"; fail=1; fi
 if grep -q '^CONFIG_PAGE_REPORTING=y' "$cfg"; then echo "ok   free-page reporting (CONFIG_PAGE_REPORTING)"; else echo "FAIL CONFIG_PAGE_REPORTING"; fail=1; fi
 echo "sessions wayland: $(ls /usr/share/wayland-sessions 2>/dev/null | tr '\n' ' ')"
 echo "sessions x11:     $(ls /usr/share/xsessions 2>/dev/null | tr '\n' ' ')"

@@ -108,6 +108,16 @@ stop_bridge() {
   esac
   return 0
 }
+# A QEMU that has this state's overlay open but that the pid record does not
+# vouch for (record lost, written by an older kdevm, identity check failed)
+# must not be started beside, and its disks must not be removed from under
+# it. Fixed-string match on the process table; the needle travels in the
+# environment so the matcher cannot find itself.
+refuse_if_stray() { # verb
+  local stray
+  stray=$(ps -axo pid=,command= | NEEDLE="file=$WORK" awk 'index($0, ENVIRON["NEEDLE"]) { print $1; exit }')
+  [[ -z "$stray" ]] || die "a QEMU has $WORK open (pid $stray) but is not tracked; refusing to $1. Stop it first (kdevm.sh ssh 'sudo poweroff', or kill $stray)"
+}
 refuse_if_unknown() { # verb
   local PF_PID PF_START
   if [[ "$(qemu_state)" == unknown ]]; then
@@ -166,7 +176,7 @@ print(1)' ;;
 # output is checked; iconutil only writes to a name ending in .icns.
 # Cosmetic: the caller turns a failure into a warning.
 install_icon() {
-  local src="${KDEVM_ICON:-$REPO/assets/kdevm-icon.png}" dest="${RT:h}/TryOmarchy.icns" new="${RT:h}/TryOmarchy.new.icns" set="$STATE/icon.iconset" s f
+  local src="${KDEVM_ICON:-$REPO/assets/kdevm-icon.png}" dest="${RT:h}/TryOmarchy.icns" new="${RT:h}/TryOmarchy.new.$$.icns" set="$STATE/icon.iconset" s f
   [[ -f "$src" ]] || return 1
   {
     rm -rf "$set"; mkdir "$set" || return 1
@@ -186,8 +196,9 @@ ensure_runtime() { [[ -x "$QEMU" && -x "$HELPER" ]] || { log "runtime missing; b
 ensure_factory() { [[ -f "$FACTORY" ]] || { log "factory missing; building (about 2 min)"; kdevm_factory_build; }; }
 
 up() {
-  ensure_runtime; ensure_factory
+  # Configuration is checked before anything is built or launched.
   [[ "$TIMEZONE" == (mirror|off) ]] || die "KDEVM_TIMEZONE must be mirror or off, not '$TIMEZONE'"
+  ensure_runtime; ensure_factory
   refuse_if_unknown "start"
   if running; then log "already running (pid $(qemu_pid))"; return 0; fi
   install -d -m 700 "$STATE" "$RUN"; chmod 700 "$STATE"; mkdir -p "$SHARE"
@@ -195,10 +206,7 @@ up() {
   # Private UEFI variable store: a copy of the template, never the template.
   [[ -f "$EFIVARS" ]] || cp "$FW_VARS_TEMPLATE" "$EFIVARS"
   chmod 600 "$WORK" "$EFIVARS" "$FACTORY" 2>/dev/null || true
-  # Defence in depth: a QEMU on this overlay that the pid file does not know
-  # about (pid file lost, identity check failed) must not be started beside.
-  local stray; stray=$(pgrep -f -- "file=$WORK" | head -1 || true)
-  [[ -n "$stray" ]] && die "a QEMU already runs on $WORK (pid $stray) but is not tracked; stop it (kdevm.sh ssh 'sudo poweroff', or kill $stray) before up"
+  refuse_if_stray "start another"
   rm -f "${SOCKETS[@]}"
   install_icon || log "warning: could not build the Dock icon from ${KDEVM_ICON:-$REPO/assets/kdevm-icon.png}; the Dock icon is unchanged"
   # The helper's bridges accept only a socket owned by this uid with no
@@ -348,6 +356,9 @@ up() {
 down() {
   refuse_if_unknown "stop"
   if ! running; then
+    # "Not running" is only true if nothing has the overlay open. destroy and
+    # rebuild come through here before they remove anything.
+    refuse_if_stray "treat the VM as stopped"
     # No QEMU: a verified supervisor of ours (if any lingers) is stopped too;
     # an unverifiable one keeps its record and down reports it (exit 2).
     local brc=0; stop_bridge || brc=$?

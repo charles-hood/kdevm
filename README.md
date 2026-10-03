@@ -153,8 +153,10 @@ fw_cfg opt/kdevm/*         <-- per-launch hints (scale)                     <-- 
   that holds the lifecycle lock) downloads and verifies the Debian 13 generic
   arm64 cloud image (the generic kernel has virtio-gpu, HDA, 9p; the cloud
   kernel does not), renders `guest/user-data.yaml.tmpl`, boots it headless
-  with a NoCloud seed, waits for cloud-init, runs thirteen kernel capability
-  checks that fail the build if a needed module is missing, and powers off.
+  with a NoCloud seed, waits for cloud-init, runs fifteen checks that fail
+  the build (the kernel modules and options it needs, the battery module,
+  and the two policies that keep the guest from sleeping or acting on the
+  battery), and powers off.
   The factory never runs cloud-init again. The guest files in
   `guest/vendor/` come verbatim from try-omarchy: the clipboard agent, its
   unit and udev rule, a PipeWire quantum drop-in for the emulated HDA, and
@@ -162,7 +164,9 @@ fw_cfg opt/kdevm/*         <-- per-launch hints (scale)                     <-- 
   that DKMS builds in the factory, which presents the Mac's battery as
   `BAT0`/`ADP0` so UPower and Plasma's battery applet read it like any
   laptop's). The battery is shown, never acted on: sleep is disabled in the
-  guest, because a suspended guest cannot be woken on this machine type. The time
+  guest, because a suspended guest cannot be woken on this machine type,
+  and neither Plasma's power manager nor UPower does anything at a critical
+  level. The time
   zone receiver (`guest/files/kdevm-timezone`) is ours: their helper writes
   the Mac's zone to a virtio port every five seconds, udev starts the
   receiver when that port exists, and it calls `timedatectl` when the zone

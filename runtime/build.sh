@@ -27,8 +27,6 @@ REPO="$(cd "$(dirname "$0")/.." && pwd)"
 KDEVM_TOOL=runtime/build.sh
 source "$REPO/lib/kdevm-common.zsh"
 kdevm_load_env
-# KDEVM_OFFLINE=1 (set by tests/checks.sh) must never reach a fetch or a build.
-[[ "${KDEVM_OFFLINE:-}" == 1 ]] && die "runtime build requested while KDEVM_OFFLINE=1; refusing to fetch or build anything"
 PIN="$(tr -d '[:space:]' < "$REPO/runtime/pin.txt")"
 SCRATCH="${KDEVM_SCRATCH:-${KDEVM_STATE:-$HOME/.cache/kdevm}/build}"
 SRC="$SCRATCH/try-omarchy"
@@ -36,13 +34,23 @@ DEST_ROOT="${KDEVM_RUNTIME_ROOT:-${XDG_DATA_HOME:-$HOME/.local/share}/kdevm/runt
 DEST="$DEST_ROOT/$PIN"
 UPSTREAM=https://github.com/omacom/try-omarchy
 
+# One build at a time per scratch checkout and per runtime root: a second
+# build would revert the first one's rebrand edits under its compiler, or
+# stage over it. Kernel advisory locks, held by this process until it ends.
+mkdir -p "$SCRATCH" "$DEST_ROOT"
+for lockfile in "$DEST_ROOT/build.lock" "$SCRATCH/build.lock"; do
+  : >> "$lockfile"
+  zsystem flock -t 0 "$lockfile" 2>/dev/null || die "another runtime build is running ($lockfile is held); wait for it"
+done
+
 if [[ -x "$DEST/bin/kdevm" && -x "$DEST/bin/omarchy-vm-helper" && "${1:-}" != --force ]]; then
   echo "runtime $PIN already staged at $DEST (use --force to rebuild)"; exit 0
 fi
+# KDEVM_OFFLINE=1 (set by tests/checks.sh) must never reach a fetch or a build.
+[[ "${KDEVM_OFFLINE:-}" == 1 ]] && die "runtime build requested while KDEVM_OFFLINE=1; refusing to fetch or build anything"
 
 t0=$(date +%s)
 echo "== checkout try-omarchy @ $PIN"
-mkdir -p "$SCRATCH" "$DEST_ROOT"
 if [[ ! -d "$SRC/.git" ]]; then
   git init -q "$SRC"
   git -C "$SRC" remote add origin "$UPSTREAM"

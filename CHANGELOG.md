@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+First review pass on the work below (Codex, discovery, commit 5763b80); the
+fixes so far:
+
+- `down`, `destroy` and `rebuild` refuse when a QEMU has the overlay open
+  but the pid record does not vouch for it. Before, such a VM counted as
+  "not running", and `destroy` or `rebuild` then removed the overlay and the
+  UEFI variables from under it. Updating from 0.1.0 with the VM still
+  running produced exactly that record mismatch.
+- The guest no longer powers itself off at a critical battery level. UPower
+  has its own critical action, separate from Plasma's; with sleep disabled
+  it fell through to PowerOff, and a guest at 1% shut down 22 seconds later.
+  It is now `Ignore`, and the factory build fails if that did not take.
+- Two runtime builds can no longer share a scratch checkout or a runtime
+  root (kernel locks in `runtime/build.sh`): the second could revert the
+  first one's rebrand under its compiler.
+- `KDEVM_TIMEZONE` is validated before anything is built; the rendered-seed
+  checks are skipped together when PyYAML is missing; the Dock icon is built
+  under a name no other `up` shares. Five more offline checks (70 in all).
+
 - Battery mirroring: the Mac's battery appears in the guest as a real
   `BAT0`/`ADP0` (charge, state, time estimates, cycle count), so UPower and
   Plasma's battery applet read it like any laptop's. try-omarchy's helper
@@ -43,8 +62,8 @@
   process's start time in the caller's zone, so a VM started in one zone
   and inspected from another was reported as not running; the lookup is now
   pinned to UTC and the C locale. Update with the VM stopped: a VM that is
-  running across the update is no longer recognised and has to be powered
-  off from inside the guest.
+  running across the update is no longer recognised; kdevm refuses to treat
+  it as stopped and it has to be powered off from inside the guest.
 - One supervisor now runs every host bridge (clipboard, time zone), restarts
   a helper that exits, and stops its helpers when it is stopped. Its files
   are `bridges.pid` and `bridges.log` (an old `clipboard-bridge.log` in the

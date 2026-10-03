@@ -295,7 +295,8 @@ write_files:
   # ---- powerdevil is installed for its battery applet only. The battery is
   #      the Mac's, and so is every decision about it: nothing happens at a
   #      critical level, and the screen is not dimmed or turned off on idle
-  #      (it never was before powerdevil was here).
+  #      (it never was before powerdevil was here). UPower has a critical
+  #      action of its own; runcmd turns that one off.
   - path: /etc/xdg/powerdevilrc
     permissions: "0644"
     content: |
@@ -385,6 +386,12 @@ runcmd:
   # one the factory boots next), not the one cloud-init happens to run on.
   # The factory's capability checks fail the build if it is missing.
   - [ sh, -c, "dkms install try-omarchy-battery/1.2.0 -k \"$(ls -1 /lib/modules | sort -V | tail -1)\"" ]
+  # UPower acts on a critical battery by itself, whatever powerdevil is told:
+  # with sleep disabled its HybridSleep falls through to PowerOff, and a guest
+  # at 1% powered off 22 s later (2026-10-03). The battery is the Mac's to act
+  # on. UPower 1.90.9 reads no drop-in directory, so its own file is edited;
+  # the factory's checks fail the build if these lines did not take.
+  - [ sed, -i, -e, "s/^AllowRiskyCriticalPowerAction=.*/AllowRiskyCriticalPowerAction=true/", -e, "s/^CriticalPowerAction=.*/CriticalPowerAction=Ignore/", /etc/UPower/UPower.conf ]
   # services: Mac share mount, clipboard agent for every graphical session, battery agent, graphical boot
   - systemctl daemon-reload
   - systemctl enable omarchy-native-battery-bridge.service

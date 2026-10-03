@@ -255,13 +255,10 @@ rule = files["/etc/udev/rules.d/93-kdevm-timezone.rules"]["content"]
 assert f'ATTR{{name}}=="{port}"' in rule and 'ENV{SYSTEMD_WANTS}+="kdevm-timezone.service"' in rule
 assert f"name={port}" in open("kdevm.sh").read() and f'"/dev/virtio-ports/{port}"'.encode() in source
 PYT
-else
-  echo "SKIP  YAML rendering (no .venv with PyYAML; see header)"
-fi
   # 7b. battery: every vendored file reaches the seed byte for byte at the
   #     path the guest expects, the DKMS version in the path is the one in
   #     dkms.conf, and the port name is the same in launcher, agent and rule
-  .venv/bin/python - "$T/ud.yaml" <<'PYB' && pass "battery: agent, unit, rules and module sources rendered byte for byte; DKMS version and port name consistent" || fail "battery pieces in the rendered user-data"
+  .venv/bin/python - "$T/ud.yaml" <<'PYB' && pass "battery: vendored files rendered byte for byte; DKMS version and port name consistent; UPower critical action turned off and checked by the factory" || fail "battery pieces in the rendered user-data"
 import base64, re, sys, yaml
 seed = yaml.safe_load(open(sys.argv[1])); files = {f["path"]: f for f in seed["write_files"]}
 V = "guest/vendor/"; version = re.search(r'PACKAGE_VERSION="([^"]+)"', open(V + "try-omarchy-battery/dkms.conf").read()).group(1)
@@ -278,9 +275,15 @@ assert files["/usr/local/bin/omarchy-native-battery-bridge"]["permissions"] == "
 run = [" ".join(c) if isinstance(c, list) else c for c in seed["runcmd"]]
 assert any(f"dkms install try-omarchy-battery/{version} " in c for c in run) and "systemctl enable omarchy-native-battery-bridge.service" in run
 assert {"dkms", "linux-headers-arm64", "powerdevil"} <= set(seed["packages"])
+# nothing acts on the mirrored battery: UPower's own critical action is turned off, and the factory build checks it took
+assert any("s/^CriticalPowerAction=.*/CriticalPowerAction=Ignore/" in c and "/etc/UPower/UPower.conf" in c for c in run)
+assert "grep -qx 'CriticalPowerAction=Ignore' /etc/UPower/UPower.conf" in open("guest/factory.zsh").read()
 port = "dev.tryomarchy.battery"
 assert f"name={port}" in open("kdevm.sh").read() and port in open(V + "omarchy-native-battery-bridge").read() and port in open(V + "95-omarchy-native-battery.rules").read()
 PYB
+else
+  echo "SKIP  YAML rendering and the rendered-seed checks (no .venv with PyYAML; see header)"
+fi
 
 # 8. config loader: any NAME=value is read, an explicit (even empty) variable wins
 mkdir -p "$T/home/.config/kdevm"; printf 'QEMU_IMG=/custom/qemu-img\nKDEVM_USER=fromfile\nKDEVM_MEM_MB=1234\n' > "$T/home/.config/kdevm/env"
@@ -351,7 +354,7 @@ EOF
   # 10a. Dock icon: the same up built TryOmarchy.icns in the runtime root (where
   #      the patched QEMU looks) from the repo's PNG and left no work files
   ICNS="$T/fakert/TryOmarchy.icns"
-  if [[ "$(head -c 4 "$ICNS" 2>/dev/null)" == icns && ! -e "$T/fakert/TryOmarchy.new.icns" && ! -e "$T/v10/icon.iconset" && "$out" != *"Dock icon"* ]]; then pass "Dock icon: icns built in the runtime root from the default PNG, no work files left"; else fail "Dock icon install ($(ls "$T/fakert" | tr '\n' ' '))"; fi
+  if [[ "$(head -c 4 "$ICNS" 2>/dev/null)" == icns && -z "$(ls "$T/fakert" | grep -v -x -e current -e TryOmarchy.icns)" && ! -e "$T/v10/icon.iconset" && "$out" != *"Dock icon"* ]]; then pass "Dock icon: icns built in the runtime root from the default PNG, no work files left"; else fail "Dock icon install ($(ls "$T/fakert" | tr '\n' ' '))"; fi
   # 10b. start-time capture fails right after launch: the child is terminated, not orphaned
   rm -rf "$T/v10/run" "$T/v10/work.qcow2" "$T/v10/vars.fd"; : > "$T/v10/vars.fd"
   cat > "$T/fakebin2/ps" <<'EOF'
@@ -369,7 +372,7 @@ EOF
   printf 'not an image' > "$T/v10/bad.png"; before=$(shasum "$ICNS" 2>/dev/null)
   out=$(PATH="$T/fakebin2:$PATH" KDEVM_STATE="$T/v10" KDEVM_RUNTIME_ROOT="$T/fakert" KDEVM_FW_CODE="$T/v10/code.fd" KDEVM_FW_VARS="$T/v10/vars.fd" KDEVM_SHARE="$T/v10/share" KDEVM_WINDOW=keep KDEVM_ICON="$T/v10/bad.png" ./kdevm.sh up 2>&1); rc=$?
   left=$(pgrep -f "$FRT/bin/kdevm" || true)
-  if [[ "$out" == *"could not build the Dock icon"* && "$out" == *"start time"* && -n "$before" && "$(shasum "$ICNS")" == "$before" && ! -e "$T/fakert/TryOmarchy.new.icns" && ! -e "$T/v10/icon.iconset" ]]; then pass "Dock icon: unusable KDEVM_ICON warns, up continues, existing icns untouched"; else fail "Dock icon failure handling (rc=$rc)"; fi
+  if [[ "$out" == *"could not build the Dock icon"* && "$out" == *"start time"* && -n "$before" && "$(shasum "$ICNS")" == "$before" && -z "$(ls "$T/fakert" | grep -v -x -e current -e TryOmarchy.icns)" && ! -e "$T/v10/icon.iconset" ]]; then pass "Dock icon: unusable KDEVM_ICON warns, up continues, existing icns untouched"; else fail "Dock icon failure handling (rc=$rc)"; fi
   [[ -n "$left" ]] && kill $left 2>/dev/null
 else
   echo "SKIP  failed-readiness probe (no qemu-img)"
@@ -433,6 +436,39 @@ EOF
 else
   echo "SKIP  wrapper-driven factory probes (need qemu-img and mkisofs)"
 fi
+
+# 12b. two runtime builds cannot share a scratch checkout or a runtime root:
+#      a builder that finds either kernel lock held refuses before touching
+#      the checkout (a concurrent build would revert its rebrand edits)
+for held in root scratch; do
+  mkdir -p "$T/v12b/$held/rt" "$T/v12b/$held/scratch"
+  [[ $held == root ]] && lf="$T/v12b/$held/rt/build.lock" || lf="$T/v12b/$held/scratch/build.lock"
+  zsh -c 'zmodload zsh/system; : >> "$1"; zsystem flock "$1"; echo held; sleep 30' _ "$lf" > "$T/v12b/$held/holder.out" 2>&1 & LH3=$!
+  for i in {1..50}; do [[ "$(cat "$T/v12b/$held/holder.out" 2>/dev/null)" == held ]] && break; sleep 0.1; done
+  out=$(KDEVM_RUNTIME_ROOT="$T/v12b/$held/rt" KDEVM_SCRATCH="$T/v12b/$held/scratch" ./runtime/build.sh 2>&1); rc=$?
+  if [[ $rc -ne 0 && "$out" == *"another runtime build is running"* && "$out" != *"KDEVM_OFFLINE"* && ! -d "$T/v12b/$held/scratch/try-omarchy" ]]; then pass "runtime build refused while another holds the $held lock; checkout untouched"; else fail "runtime build lock ($held; rc=$rc: $out)"; fi
+  kill $LH3 2>/dev/null; wait $LH3 2>/dev/null
+done
+
+# 12c. a QEMU that has this state's overlay open but is not vouched for by the
+#      pid record (no record, or one written by an older kdevm: another start
+#      time rendering) is never treated as stopped: down, destroy and rebuild
+#      refuse, the disks stay, the process is not signalled
+mkdir -p "$T/v12c"; : > "$T/v12c/work.qcow2"; : > "$T/v12c/efivars.fd"; : > "$T/v12c/factory.qcow2"
+ARGV0="/old/runtime/bin/qemu-system-aarch64 -name kdevm -drive if=none,id=root,file=$T/v12c/work.qcow2,format=qcow2" zsh -c 'sleep 120; :' & OLDQ=$!; sleep 0.3
+stray_ok=1
+for record in none old; do
+  for verb in down destroy "destroy --all" rebuild; do
+    [[ $record == old ]] && echo "$OLDQ $(TZ=Asia/Tokyo ps -o lstart= -p $OLDQ | awk '{$1=$1; print}')" > "$T/v12c/qemu.pid" || rm -f "$T/v12c/qemu.pid"
+    out=$(KDEVM_STATE="$T/v12c" KDEVM_RUNTIME_ROOT="$T/fakert4" ./kdevm.sh ${=verb} 2>&1); rc=$?
+    if [[ $rc -eq 0 || "$out" != *"but is not tracked"* || "$out" != *"pid $OLDQ"* || ! -e "$T/v12c/work.qcow2" || ! -e "$T/v12c/efivars.fd" || ! -e "$T/v12c/factory.qcow2" ]] || ! kill -0 $OLDQ 2>/dev/null; then stray_ok=0; echo "      $verb with record=$record: rc=$rc $(echo "$out" | tail -1)"; fi
+  done
+done
+[[ $stray_ok -eq 1 ]] && pass "untracked QEMU on the overlay: down, destroy, destroy --all and rebuild refuse (no record, and a 0.1-style record); disks kept, process untouched" || fail "stray QEMU guard on destructive verbs"
+kill $OLDQ 2>/dev/null; wait $OLDQ 2>/dev/null
+# the same verbs still work when nothing has the overlay open
+out=$(KDEVM_STATE="$T/v12c" KDEVM_RUNTIME_ROOT="$T/fakert4" ./kdevm.sh destroy 2>&1); rc=$?
+[[ $rc -eq 0 && ! -e "$T/v12c/work.qcow2" && -e "$T/v12c/factory.qcow2" ]] && pass "destroy with nothing on the overlay: overlay removed, factory kept" || fail "destroy on an idle state (rc=$rc: $out)"
 
 # 13. host bridges, end to end with fakes: a fake QEMU that binds every chardev
 #     socket and answers QMP (system_powerdown ends it), and a fake helper that
@@ -503,6 +539,11 @@ EOF
   rm -f "$T/v13/fakeqemu.argv"
   out=$(KDEVM_TIMEZONE=utc k13 up); rc=$?
   [[ $rc -ne 0 && "$out" == *"KDEVM_TIMEZONE must be mirror or off"* && ! -e "$T/v13/fakeqemu.argv" && ! -e "$T/v13/qemu.pid" ]] && pass "KDEVM_TIMEZONE with another value: refused, nothing launched" || fail "KDEVM_TIMEZONE validation (rc=$rc)"
+  #      ... and before anything is built: with no runtime and no factory at
+  #      all, the refusal is still about the value, not a build attempt
+  mkdir -p "$T/v13f"
+  out=$(KDEVM_TIMEZONE=utc KDEVM_STATE="$T/v13f/state" KDEVM_RUNTIME_ROOT="$T/v13f/rt" ./kdevm.sh up 2>&1); rc=$?
+  [[ $rc -ne 0 && "$out" == *"KDEVM_TIMEZONE must be mirror or off"* && "$out" != *building* && "$out" != *KDEVM_OFFLINE* && ! -e "$T/v13f/rt" && ! -e "$T/v13f/state/factory.qcow2.building" ]] && pass "KDEVM_TIMEZONE is validated before the runtime or factory would be built" || fail "KDEVM_TIMEZONE validated too late (rc=$rc: $out)"
   # isolation: every network call in this fixture went to a stub
   grep -q '^ssh ' "$KDEVM_TEST_NETLOG" && pass "bridge fixture: down's ssh went to the stub, no real service contacted" || fail "bridge fixture network isolation (log: $(tr '\n' ';' < "$KDEVM_TEST_NETLOG"))"
   unset KDEVM_TEST_NETLOG
