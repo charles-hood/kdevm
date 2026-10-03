@@ -8,7 +8,7 @@ under `guest/vendor/` (MIT, see there).
 | component | what kdevm uses | license | where it comes from |
 |---|---|---|---|
 | [try-omarchy](https://github.com/omacom/try-omarchy) | the QEMU/VirGL/libslirp build script and its 23 patches, the Swift helper (`omarchy-vm-helper`, clipboard and time zone bridges), four guest files vendored verbatim | MIT | cloned at the commit in `runtime/pin.txt`; vendored files carry their upstream path in `guest/vendor/README.md` |
-| [QEMU](https://www.qemu.org/) | `qemu-system-aarch64` 11.1.1 built from source by try-omarchy's script, run under HVF | GPL-2.0-only (with LGPL and BSD parts) | gitlab.com/qemu-project, commit pinned in try-omarchy's script |
+| [QEMU](https://www.qemu.org/) | `qemu-system-aarch64` 11.1.1 built from source by try-omarchy's script, staged as `bin/kdevm`, run under HVF | GPL-2.0-only (with LGPL and BSD parts) | gitlab.com/qemu-project, commit pinned in try-omarchy's script |
 | [virglrenderer](https://gitlab.freedesktop.org/virgl/virglrenderer) | the host-side OpenGL replay, built from source with the startergo patch set | MIT | pinned by try-omarchy's script |
 | [libslirp](https://gitlab.freedesktop.org/slirp/libslirp) | user-mode networking | BSD-3-Clause | pinned by try-omarchy's script |
 | ANGLE, libepoxy | GL dispatch and compatibility libraries in the runtime | BSD-3-Clause, MIT | startergo Homebrew bottles pinned by try-omarchy's script |

@@ -67,7 +67,7 @@ cd ~/Projects/kdevm
 `up` builds whatever is missing: the runtime (about two minutes), then the
 factory image (about two minutes, a headless VM running cloud-init), then
 opens the window. Plasma logs in by itself. The first microphone use
-triggers a macOS permission prompt for `qemu-system-aarch64`.
+triggers a macOS permission prompt for the VM's binary, `kdevm`.
 
 Run `./kdevm.sh preflight` instead of `up` the first time if you want the
 graphics stack checked before Plasma touches it: it stops the display
@@ -137,8 +137,12 @@ fw_cfg opt/kdevm/*         <-- per-launch hints (scale)                     <-- 
 - **Runtime.** `runtime/build.sh` clones try-omarchy at `runtime/pin.txt`,
   runs their `macos/build-qemu-gpu-runtime.sh` unchanged except for one
   string (the product name in the Cocoa identity patch becomes "kdevm"),
-  builds the Swift helper with `swift build`, and stages both. The result
-  is ad-hoc signed with the hypervisor entitlement. `docs/patches.md` lists
+  builds the Swift helper with `swift build` (the same string changed on
+  the one line that names the process its bridges will attach to), and
+  stages both. QEMU is staged as `bin/kdevm`, as their app build stages it
+  as "Try Omarchy": the Dock, Force Quit and crash reports label a bare
+  executable with its file name. The result is ad-hoc signed with the
+  hypervisor entitlement. `docs/patches.md` lists
   the 23 patches and what each does.
 - **Guest.** `guest/factory.zsh` (run by `guest/build.sh` directly, or by
   `kdevm.sh factory`, `rebuild` and a first-run `up`, always in the process

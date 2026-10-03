@@ -24,7 +24,7 @@ export KDEVM_OFFLINE=1 KDEVM_SCRATCH="$T/scratch"
 fails=0
 pass() { echo "PASS  $1"; }
 fail() { echo "FAIL  $1"; fails=$((fails + 1)); }
-need_runtime() { [[ -x "${KDEVM_RUNTIME_ROOT:-${XDG_DATA_HOME:-$HOME/.local/share}/kdevm/runtime}/current/bin/qemu-system-aarch64" ]]; }
+need_runtime() { [[ -x "${KDEVM_RUNTIME_ROOT:-${XDG_DATA_HOME:-$HOME/.local/share}/kdevm/runtime}/current/bin/kdevm" ]]; }
 
 # 0. syntax
 for f in kdevm.sh guest/build.sh runtime/build.sh lib/kdevm-common.zsh tests/checks.sh; do
@@ -166,7 +166,7 @@ hit=0; for a in "$@"; do [ "$a" = "lstart=" ] && hit=1; done
 if [ "$hit" = 1 ] && [ -n "$KDEVM_TEST_UNKNOWN_PID" ]; then for a in "$@"; do [ "$a" = "$KDEVM_TEST_UNKNOWN_PID" ] && exit 1; done; fi
 exec /bin/ps "$@"
 EOF
-mkdir -p "$T/v4h" "$T/fakert4/current/bin"; : > "$T/fakert4/current/bin/qemu-system-aarch64"; : > "$T/fakert4/current/bin/omarchy-vm-helper"; chmod +x "$T/fakert4/current/bin/"*
+mkdir -p "$T/v4h" "$T/fakert4/current/bin"; : > "$T/fakert4/current/bin/kdevm"; : > "$T/fakert4/current/bin/omarchy-vm-helper"; chmod +x "$T/fakert4/current/bin/"*
 # Network isolation for this fixture: status probes the ssh port with `nc`
 # and, if it answers, runs diagnostics over `ssh`. Both are called by bare
 # name, so stubs first in PATH intercept every call; the stubs log and fail
@@ -185,7 +185,7 @@ check_status() { # label, expected qemu line fragment
 # (a) QEMU absent: no qemu.pid
 check_status absent "qemu: not running"
 # (b) QEMU running: a process whose command line matches the runtime QEMU on this state's overlay
-ARGV0="$T/fakert4/current/bin/qemu-system-aarch64 -drive file=$T/v4h/work.qcow2" zsh -c 'sleep 120; :' & FQ=$!; sleep 0.3
+ARGV0="$T/fakert4/current/bin/kdevm -drive file=$T/v4h/work.qcow2" zsh -c 'sleep 120; :' & FQ=$!; sleep 0.3
 echo "$FQ $(proc_start $FQ)" > "$T/v4h/qemu.pid"
 check_status running "qemu: pid $FQ"
 # (c) QEMU unknown: its own start-time lookup fails too (wrapper fails every lstart)
@@ -300,7 +300,7 @@ done
 QI="${QEMU_IMG:-/opt/homebrew/bin/qemu-img}"
 if [[ -x "$QI" ]]; then
   FRT="$T/fakert/current"; mkdir -p "$FRT/bin" "$T/v10"
-  cat > "$FRT/bin/qemu-system-aarch64" <<'EOF'
+  cat > "$FRT/bin/kdevm" <<'EOF'
 #!/bin/zsh
 # fake QEMU: bind the QMP and clipboard sockets named on the command line, then hang
 qmp=""; clip=""
@@ -319,12 +319,12 @@ for p in sys.argv[1:]:
 time.sleep(120)
 PYF
 EOF
-  chmod +x "$FRT/bin/qemu-system-aarch64"
+  chmod +x "$FRT/bin/kdevm"
   printf '#!/bin/sh\necho 48000\n' > "$FRT/bin/omarchy-vm-helper"; chmod +x "$FRT/bin/omarchy-vm-helper"
   "$QI" create -q -f qcow2 "$T/v10/factory.qcow2" 1M
   : > "$T/v10/code.fd"; : > "$T/v10/vars.fd"
   out=$(KDEVM_STATE="$T/v10" KDEVM_RUNTIME_ROOT="$T/fakert" KDEVM_FW_CODE="$T/v10/code.fd" KDEVM_FW_VARS="$T/v10/vars.fd" KDEVM_SHARE="$T/v10/share" KDEVM_WINDOW=keep KDEVM_ICON= ./kdevm.sh up 2>&1); rc=$?
-  left=$(pgrep -f "$FRT/bin/qemu-system-aarch64" || true)
+  left=$(pgrep -f "$FRT/bin/kdevm" || true)
   if [[ $rc -ne 0 && -z "$left" && ! -e "$T/v10/qemu.pid" && "$out" == *"failed to start"* ]]; then pass "failed readiness: fake QEMU terminated, non-zero exit, no pid file"; else fail "failed readiness (rc=$rc, leftover='$left')"; [[ -n "$left" ]] && kill $left 2>/dev/null; fi
   # 10a. Dock icon: the same up built TryOmarchy.icns in the runtime root (where
   #      the patched QEMU looks) from the repo's PNG and left no work files
@@ -338,7 +338,7 @@ for a in "$@"; do [ "$a" = "lstart=" ] && exit 1; done
 exec /bin/ps "$@"
 EOF
   out=$(PATH="$T/fakebin2:$PATH" KDEVM_STATE="$T/v10" KDEVM_RUNTIME_ROOT="$T/fakert" KDEVM_FW_CODE="$T/v10/code.fd" KDEVM_FW_VARS="$T/v10/vars.fd" KDEVM_SHARE="$T/v10/share" KDEVM_WINDOW=keep ./kdevm.sh up 2>&1); rc=$?
-  left=$(pgrep -f "$FRT/bin/qemu-system-aarch64" || true)
+  left=$(pgrep -f "$FRT/bin/kdevm" || true)
   if [[ $rc -ne 0 && -z "$left" && ! -e "$T/v10/qemu.pid" && "$out" == *"start time"* ]]; then pass "launch-time start capture failure: child terminated, no pid file"; else fail "start capture failure (rc=$rc, leftover='$left')"; [[ -n "$left" ]] && kill $left 2>/dev/null; fi
   # 10c. an unusable KDEVM_ICON is a warning, not a stop: up goes on to launch
   #      QEMU (it reaches the start-time failure above) and the icns in place
@@ -346,7 +346,7 @@ EOF
   rm -rf "$T/v10/run" "$T/v10/work.qcow2" "$T/v10/vars.fd"; : > "$T/v10/vars.fd"
   printf 'not an image' > "$T/v10/bad.png"; before=$(shasum "$ICNS" 2>/dev/null)
   out=$(PATH="$T/fakebin2:$PATH" KDEVM_STATE="$T/v10" KDEVM_RUNTIME_ROOT="$T/fakert" KDEVM_FW_CODE="$T/v10/code.fd" KDEVM_FW_VARS="$T/v10/vars.fd" KDEVM_SHARE="$T/v10/share" KDEVM_WINDOW=keep KDEVM_ICON="$T/v10/bad.png" ./kdevm.sh up 2>&1); rc=$?
-  left=$(pgrep -f "$FRT/bin/qemu-system-aarch64" || true)
+  left=$(pgrep -f "$FRT/bin/kdevm" || true)
   if [[ "$out" == *"could not build the Dock icon"* && "$out" == *"start time"* && -n "$before" && "$(shasum "$ICNS")" == "$before" && ! -e "$T/fakert/TryOmarchy.new.icns" && ! -e "$T/v10/icon.iconset" ]]; then pass "Dock icon: unusable KDEVM_ICON warns, up continues, existing icns untouched"; else fail "Dock icon failure handling (rc=$rc)"; fi
   [[ -n "$left" ]] && kill $left 2>/dev/null
 else
@@ -360,7 +360,7 @@ fi
 QI="${QEMU_IMG:-/opt/homebrew/bin/qemu-img}"
 if [[ -x "$QI" ]] && command -v mkisofs >/dev/null; then
   F2="$T/fakert2/current/bin"; mkdir -p "$F2" "$T/v11"
-  cat > "$F2/qemu-system-aarch64" <<'EOF'
+  cat > "$F2/kdevm" <<'EOF'
 #!/bin/zsh
 # fake provisioning QEMU: who launched me, is the lock held, then fail fast
 echo $PPID > "$KDEVM_STATE/fakeqemu.ppid"
@@ -369,7 +369,7 @@ if zsystem flock -t 0 "$KDEVM_STATE/lock" 2>/dev/null; then echo free; else echo
 [[ -n "${KDEVM_FAKE_QEMU_SLEEP:-}" ]] && sleep "$KDEVM_FAKE_QEMU_SLEEP"
 exit 1
 EOF
-  chmod +x "$F2/qemu-system-aarch64"
+  chmod +x "$F2/kdevm"
   printf '#!/bin/sh\necho 48000\n' > "$F2/omarchy-vm-helper"; chmod +x "$F2/omarchy-vm-helper"   # every runtime executable: no fallback to the real builder
   "$QI" create -q -f qcow2 "$T/v11/debian-13-generic-arm64.qcow2" 1M
   printf '%s  debian-13-generic-arm64.qcow2\n' "$(shasum -a 512 "$T/v11/debian-13-generic-arm64.qcow2" | cut -d' ' -f1)" > "$T/v11/SHA512SUMS"
@@ -384,7 +384,7 @@ EOF
   pgrep -f '^(/bin/)?zsh .*guest/build\.sh' >/dev/null && fail "a separate guest/build.sh process exists" || pass "no separate builder process was involved"
   [[ "$(cat "$T/v11/out")" != *"runtime build requested"* && ! -d "$T/scratch/try-omarchy" ]] && pass "factory probe never reached runtime/build.sh (no scratch checkout)" || fail "factory probe reached the runtime builder"
   # 11b. an incomplete runtime (helper missing) under KDEVM_OFFLINE=1 must fail loudly before any fetch
-  F3="$T/fakert3/current/bin"; mkdir -p "$F3" "$T/v11b"; cp "$F2/qemu-system-aarch64" "$F3/"
+  F3="$T/fakert3/current/bin"; mkdir -p "$F3" "$T/v11b"; cp "$F2/kdevm" "$F3/"
   out=$(KDEVM_STATE="$T/v11b" KDEVM_RUNTIME_ROOT="$T/fakert3" KDEVM_FW_CODE="$T/v11/code.fd" KDEVM_FW_VARS="$T/v11/vars.fd" ./kdevm.sh factory 2>&1); rc=$?
   [[ $rc -ne 0 && "$out" == *"runtime build requested while KDEVM_OFFLINE=1"* && ! -d "$T/scratch/try-omarchy" ]] && pass "incomplete runtime fixture: builder refused immediately under KDEVM_OFFLINE, nothing fetched" || fail "offline guard (rc=$rc: $out)"
 
@@ -396,7 +396,7 @@ EOF
     ./kdevm.sh factory > "$T/v11/out2" 2>&1 & W2=$!
   for i in {1..100}; do [[ -f "$T/v11/fakeqemu.ppid" ]] && break; sleep 0.1; done
   kill -9 $W2; wait $W2 2>/dev/null; sleep 0.3
-  orphan=$(pgrep -f "$F2/qemu-system-aarch64" || true)
+  orphan=$(pgrep -f "$F2/kdevm" || true)
   builders=$(pgrep -f -l '^(/bin/)?zsh .*(kdevm\.sh factory|guest/build\.sh)' || true)
   [[ -z "$builders" ]] && pass "holder SIGKILLed mid-build: no builder process continues" || fail "a builder continued: $builders"
   out=$(KDEVM_STATE="$T/v11" ./kdevm.sh _lockprobe 0 2>&1); rc=$?
@@ -419,7 +419,7 @@ fi
 QI="${QEMU_IMG:-/opt/homebrew/bin/qemu-img}"
 if [[ -x "$QI" ]]; then
   F5="$T/fakert5/current/bin"; mkdir -p "$F5" "$T/v13"
-  cat > "$F5/qemu-system-aarch64" <<'EOF'
+  cat > "$F5/kdevm" <<'EOF'
 #!/usr/bin/env python3
 import json, os, socket, sys
 args = sys.argv[1:]
@@ -447,7 +447,7 @@ case "$1" in
   --bridge-native-*) echo "$1 $2 $3 $$" >> "$KDEVM_STATE/helpers.log"; trap 'kill $c 2>/dev/null; exit 0' TERM; sleep 300 & c=$!; wait ;;
 esac
 EOF
-  chmod +x "$F5/qemu-system-aarch64" "$F5/omarchy-vm-helper"
+  chmod +x "$F5/kdevm" "$F5/omarchy-vm-helper"
   "$QI" create -q -f qcow2 "$T/v13/factory.qcow2" 1M
   : > "$T/v13/code.fd"; : > "$T/v13/vars.fd"; export KDEVM_TEST_NETLOG="$T/v13/netlog"; : > "$KDEVM_TEST_NETLOG"
   k13() { PATH="$T/netstub:$PATH" KDEVM_STATE="$T/v13" KDEVM_RUNTIME_ROOT="$T/fakert5" KDEVM_FW_CODE="$T/v13/code.fd" KDEVM_FW_VARS="$T/v13/vars.fd" KDEVM_SHARE="$T/v13/share" KDEVM_WINDOW=keep ./kdevm.sh "$@" 2>&1; }

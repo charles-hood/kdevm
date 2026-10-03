@@ -13,6 +13,12 @@
 # symlink; default ~/.local/share/kdevm/runtime. About two minutes on an
 # M4 Pro. Optional config: ~/.config/kdevm/env.
 #
+# QEMU is staged as bin/kdevm, the way try-omarchy's app build stages it as
+# "Try Omarchy": a bare executable has no bundle, so macOS labels it (Dock,
+# Force Quit, crash reports) with its file name. Their helper only attaches
+# to a process with that name or a qemu-system-* one, so the same rebrand is
+# applied to that one line of the helper.
+#
 #   runtime/build.sh            build (skips if <pin> already staged)
 #   runtime/build.sh --force    rebuild even if staged
 set -euo pipefail
@@ -30,7 +36,7 @@ DEST_ROOT="${KDEVM_RUNTIME_ROOT:-${XDG_DATA_HOME:-$HOME/.local/share}/kdevm/runt
 DEST="$DEST_ROOT/$PIN"
 UPSTREAM=https://github.com/omacom/try-omarchy
 
-if [[ -x "$DEST/bin/qemu-system-aarch64" && -x "$DEST/bin/omarchy-vm-helper" && "${1:-}" != --force ]]; then
+if [[ -x "$DEST/bin/kdevm" && -x "$DEST/bin/omarchy-vm-helper" && "${1:-}" != --force ]]; then
   echo "runtime $PIN already staged at $DEST (use --force to rebuild)"; exit 0
 fi
 
@@ -46,16 +52,21 @@ git -C "$SRC" checkout -q -- . 2>/dev/null || true     # drop last build's rebra
 git -C "$SRC" checkout -q --detach FETCH_HEAD
 git -C "$SRC" clean -qfd -e .build -e macos/.build
 
-# The one change to their tree: the Cocoa product-identity patch hard-codes
-# "Try Omarchy" as the process name and in the application menu (About, Hide,
-# Quit, the quit alert). Rebrand the patch to "kdevm" and update the SHA-256
-# their build script checks it against. Everything else is applied as is.
+# The one change to their tree is the product name, in two places. The Cocoa
+# product-identity patch hard-codes "Try Omarchy" as the process name and in
+# the application menu (About, Hide, Quit, the quit alert): rebrand the patch
+# to "kdevm" and update the SHA-256 their build script checks it against. The
+# helper's bridges accept a target whose executable is named "Try Omarchy":
+# that name becomes "kdevm" too. Everything else is applied as is.
 echo "== rebrand the product-identity patch: Try Omarchy -> kdevm"
 PATCH="$SRC/macos/patches/qemu-cocoa-product-identity.patch"
 sed -i '' 's/Try Omarchy/kdevm/g' "$PATCH"
 NEWSHA=$(shasum -a 256 "$PATCH" | awk '{print $1}')
 sed -i '' "s/^identity_patch_sha256=.*/identity_patch_sha256=$NEWSHA/" "$SRC/macos/build-qemu-gpu-runtime.sh"
 grep -q "^identity_patch_sha256=$NEWSHA" "$SRC/macos/build-qemu-gpu-runtime.sh" || { echo "could not pin the rebranded patch hash" >&2; exit 1; }
+IDENTITY="$SRC/macos/Sources/OmarchyVMHelper/FocusedCommandSuperBridge.swift"
+sed -i '' 's/name == "Try Omarchy"/name == "kdevm"/' "$IDENTITY"
+grep -q 'name == "kdevm"' "$IDENTITY" || { echo "could not rebrand the process name the helper accepts ($IDENTITY)" >&2; exit 1; }
 
 echo "== build QEMU/VirGL runtime (their script, otherwise unchanged)"
 ( cd "$SRC" && bash macos/build-qemu-gpu-runtime.sh )
@@ -72,6 +83,7 @@ echo "== helper built in $((t2 - t1)) s"
 echo "== stage to $DEST"
 rm -rf "$DEST.staging"
 ditto "$SRC/macos/.build/qemu-gpu-runtime" "$DEST.staging"
+mv "$DEST.staging/bin/qemu-system-aarch64" "$DEST.staging/bin/kdevm"
 install -m 0755 "$HELPER" "$DEST.staging/bin/omarchy-vm-helper"
 {
   echo "try-omarchy commit: $PIN"
@@ -79,7 +91,7 @@ install -m 0755 "$HELPER" "$DEST.staging/bin/omarchy-vm-helper"
   echo "runtime build: $((t1 - t0)) s; helper build: $((t2 - t1)) s"
   grep -E '^(qemu_commit|qemu_version|slirp_version|virgl_version|virgl_tap_version|angle_version|epoxy_version|meson_root|ninja_version)=' \
     "$SRC/macos/build-qemu-gpu-runtime.sh" || true
-  echo "qemu --version: $("$DEST.staging/bin/qemu-system-aarch64" --version | head -1)"
+  echo "qemu --version: $("$DEST.staging/bin/kdevm" --version | head -1)"
 } > "$DEST.staging/provenance.txt"
 rm -rf "$DEST"
 mv "$DEST.staging" "$DEST"

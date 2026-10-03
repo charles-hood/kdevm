@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Dock name: the running VM is labelled "kdevm" in the Dock, Force Quit and
+  crash reports, not "qemu-system-aarch64". The runtime stages QEMU as
+  `bin/kdevm`, which is how try-omarchy's app build gets its own name there,
+  and the one line of their helper that names the process its bridges accept
+  is rebranded to match. The next `up` rebuilds the runtime once (about two
+  minutes); macOS may ask for the microphone again.
+
 - Time zone mirroring (the second roadmap item): the guest's time zone
   follows the Mac's, live. try-omarchy's helper
   (`--bridge-native-timezone`) writes the Mac's zone to a second virtio port

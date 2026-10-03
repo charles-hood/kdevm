@@ -24,7 +24,7 @@ source "$REPO/lib/kdevm-common.zsh"
 kdevm_load_env
 STATE="${KDEVM_STATE:-$HOME/.cache/kdevm}"
 RT="${KDEVM_RUNTIME_ROOT:-${XDG_DATA_HOME:-$HOME/.local/share}/kdevm/runtime}/current"
-QEMU="$RT/bin/qemu-system-aarch64"
+QEMU="$RT/bin/kdevm"
 QEMU_IMG="${QEMU_IMG:-/opt/homebrew/bin/qemu-img}"
 FW_CODE="${KDEVM_FW_CODE:-/opt/homebrew/share/qemu/edk2-aarch64-code.fd}"
 FW_VARS_TEMPLATE="${KDEVM_FW_VARS:-/opt/homebrew/share/qemu/edk2-arm-vars.fd}"

@@ -338,6 +338,32 @@ What it turned up:
   `/private` would be stripped from, so the test state directory was a
   short symlink in `~/.cache`.
 
+## Dock name (2026-10-03, Charles)
+
+The Dock tooltip over the running VM read "qemu-system-aarch64". QEMU here is
+a bare executable, not an app bundle, so LaunchServices labels it with its
+file name; the product-identity patch only sets the process name and the
+menu titles.
+
+- First attempt: rename the staged binary to `kdevm` in place. The label
+  changed and both bridges died: `omarchy-vm-helper: I/O failure: ... bridge
+  target is not a QEMU system process`. The helper attaches only to a
+  process whose executable is named `qemu-system-<arch>` or `Try Omarchy`
+  (`isQEMUSystemProcess` in `FocusedCommandSuperBridge.swift`).
+- What try-omarchy does: `build-app.sh` moves `qemu-system-aarch64` to
+  `Contents/Resources/runtime/bin/Try Omarchy`, and the app's own executable
+  is `LSUIElement`, so the only Dock entry is the QEMU process under that
+  file name. That is also why the icon is looked up three directories above
+  the binary.
+- What kdevm does now: the same, with its own name. `runtime/build.sh`
+  rebrands that one helper line with the substitution it already applies to
+  the Cocoa patch and stages QEMU as `bin/kdevm`. An older staging has no
+  `bin/kdevm`, so the next `up` rebuilds the runtime; there is no in-place
+  migration because the helper has to be rebuilt as well.
+- A QEMU started by hand without the `virtio-gpu-gl-pci` device and
+  `-display cocoa` segfaults in the patched Cocoa code and puts a macOS
+  crash dialog on screen.
+
 ## Rules that are easy to forget
 
 - `gic-version=3` is mandatory under HVF on this QEMU; it rejects GICv2.
