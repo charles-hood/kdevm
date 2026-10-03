@@ -8,6 +8,13 @@
   `KSH_ARRAYS` or `NO_CLOBBER` changed how they ran; with those options
   nothing ran at all. Found by running the checks under such a file; they
   pass 98 of 98 with and without one.
+- **A missing ssh key is reported before anything is built.** `up`,
+  `factory` and `rebuild` used to build the runtime (two minutes) and only
+  then say that no ssh public key was found; `rebuild` had dropped the
+  overlay by then.
+- **Run on a second machine**: an M3 Pro on macOS 26.6.2, from a fresh
+  clone by the README's steps, removal included. The record is in
+  [docs/runbook.md](docs/runbook.md).
 - **README rewritten for a first-time reader**: a screenshot, what you get
   in plain words, what the first run asks of you, how to remove everything.
   The internals moved under "How it works".

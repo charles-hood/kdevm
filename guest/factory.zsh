@@ -43,6 +43,19 @@ kdevm_factory_cleanup() {
   return 0
 }
 
+# The ssh public key the factory installs in the guest: KDEVM_SSH_PUB, or the
+# first default key that exists. Prints its path; fails when there is none.
+kdevm_ssh_pub() {
+  local k="${KDEVM_SSH_PUB:-}"
+  if [[ -z "$k" ]]; then
+    for k in "$HOME/.ssh/id_ed25519.pub" "$HOME/.ssh/id_ecdsa.pub" "$HOME/.ssh/id_rsa.pub"; do [[ -f "$k" ]] && break; done
+  fi
+  [[ -f "$k" ]] && print -r -- "$k"
+}
+# kdevm.sh asks this before it builds a runtime, so a first-time user without
+# a key is told at once and not after the two-minute build.
+kdevm_require_ssh_pub() { kdevm_ssh_pub >/dev/null || die "no ssh public key found; set KDEVM_SSH_PUB or run ssh-keygen -t ed25519"; }
+
 kdevm_factory_build() {   # [--force]
   local force="${1:-}"
   [[ -n "${KDEVM_LOCK_FD:-}" ]] || die "internal error: kdevm_factory_build called without the lifecycle lock"
@@ -50,12 +63,7 @@ kdevm_factory_build() {   # [--force]
   local IMAGE_URL=https://cloud.debian.org/images/cloud/trixie/latest
   local IMAGE=debian-13-generic-arm64.qcow2
   local PASS_FILE="${KDEVM_PASS_FILE:-$HOME/.config/kdevm/password}"
-  local SSH_PUB="${KDEVM_SSH_PUB:-}" k
-  if [[ -z "$SSH_PUB" ]]; then
-    for k in "$HOME/.ssh/id_ed25519.pub" "$HOME/.ssh/id_ecdsa.pub" "$HOME/.ssh/id_rsa.pub"; do
-      [[ -f "$k" ]] && { SSH_PUB="$k"; break; }
-    done
-  fi
+  local SSH_PUB
   local DISK_GB="${KDEVM_DISK_GB:-40}"
   local INFO="$STATE/factory-info.txt"
   local F_SERIAL="$STATE/factory-serial.log"
@@ -79,7 +87,7 @@ kdevm_factory_build() {   # [--force]
     echo "generated a guest password at $PASS_FILE (set KDEVM_PASS_FILE to use your own)"
   fi
   chmod 600 "$PASS_FILE" 2>/dev/null || true
-  [[ -n "$SSH_PUB" && -f "$SSH_PUB" ]] || die "no ssh public key found; set KDEVM_SSH_PUB or run ssh-keygen -t ed25519"
+  kdevm_require_ssh_pub; SSH_PUB="$(kdevm_ssh_pub)"
   install -d -m 700 "$STATE"; chmod 700 "$STATE"
 
   # Guards, under the lock (a concurrent command cannot change the answer).

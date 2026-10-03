@@ -37,9 +37,10 @@ Linux image). After that the desktop opens in about 15 seconds.
 
 ## Before you start
 
-- An Apple Silicon Mac. kdevm was built and tested on one machine, an M4
-  Pro on macOS 27. The VM software underneath supports macOS 15 and newer
-  and other Apple Silicon Macs, but nobody has tried kdevm on them yet;
+- An Apple Silicon Mac. kdevm has run on two machines: the M4 Pro on
+  macOS 27 it was built on, and an M3 Pro on macOS 26, from a fresh clone
+  by following this page. The VM software underneath supports macOS 15 and
+  newer, but nobody has tried kdevm there yet;
   [reports are welcome](CONTRIBUTING.md).
 - Xcode or the Command Line Tools (`xcode-select --install`), for clang,
   Swift 6 and codesign.
@@ -64,7 +65,7 @@ with macOS (`/bin/zsh`) and ignore your shell startup files.
 
 1. The VM software (a patched QEMU and a small helper), about two minutes.
 2. The Linux image (a headless VM installs Plasma and both browsers into a
-   Debian cloud image), about two minutes.
+   Debian cloud image), two to three minutes.
 3. The desktop. Plasma logs in by itself.
 
 macOS may ask for two permissions, both for the VM's program, `kdevm`:

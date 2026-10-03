@@ -187,6 +187,7 @@ ensure_factory() { [[ -f "$FACTORY" ]] || { log "factory missing; building (abou
 up() {
   # Configuration is checked before anything is built or launched.
   [[ "$TIMEZONE" == (mirror|off) ]] || die "KDEVM_TIMEZONE must be mirror or off, not '$TIMEZONE'"
+  [[ -f "$FACTORY" ]] || kdevm_require_ssh_pub
   ensure_runtime; ensure_factory
   refuse_if_unknown "start"
   if running; then log "already running (pid $(qemu_pid))"; return 0; fi
@@ -383,7 +384,7 @@ destroy() {
   fi
 }
 
-rebuild() { down || return $?; refuse_if_stray "remove its disks"; rm -f "$WORK" "$EFIVARS" "$KNOWN_HOSTS"; ensure_runtime; kdevm_factory_build --force; }
+rebuild() { kdevm_require_ssh_pub; down || return $?; refuse_if_stray "remove its disks"; rm -f "$WORK" "$EFIVARS" "$KNOWN_HOSTS"; ensure_runtime; kdevm_factory_build --force; }
 
 ssh_guest() { ssh "${SSH_OPTS[@]}" "$USER_NAME@localhost" "$@"; }
 
@@ -454,7 +455,7 @@ status() {
 
 case "${1:-}" in
   runtime)   "$REPO/runtime/build.sh" "${@:2}" ;;
-  factory)   take_lock; ensure_runtime; kdevm_factory_build "${2:-}" ;;
+  factory)   take_lock; kdevm_require_ssh_pub; ensure_runtime; kdevm_factory_build "${2:-}" ;;
   up|launch) take_lock; up ;;
   preflight) take_lock; preflight ;;
   down)      take_lock; down ;;

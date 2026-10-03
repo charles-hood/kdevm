@@ -786,3 +786,41 @@ Compared with the container (`desktop-kde-local`): image build 80 s vs
 factory 110 s; start 3 s vs 14 s to a logged-in desktop; idle near 0 vs
 about 7% of one core; what the VM adds is the GPU, Wayland, a native
 window, mic, PNG clipboard and a shared folder.
+
+## Second machine (2026-10-03, M3 Pro, macOS 26.6.2)
+
+The README's install steps, followed on a Mac that had never run kdevm: a
+headless MacBook Pro 14 (M3 Pro, 18 GB, macOS 26.6.2, Xcode 26.6 with Swift
+6.3.3), a different user name, no `~/.config/kdevm/env`, none of the three
+Homebrew packages, no ssh key pair. Commit 165deb7. The builds were run
+over ssh in a login shell; `up` was typed in Terminal through Screen
+Sharing.
+
+| step | result |
+|---|---|
+| `brew install qemu cdrtools pkgconf` | 37 s; supplied `qemu-img`, both EDK II files, `mkisofs`, `pkg-config` |
+| `kdevm.sh factory` with no ssh key | runtime built (under two minutes), then a clear refusal: "no ssh public key found; set KDEVM_SSH_PUB or run ssh-keygen -t ed25519" |
+| `kdevm.sh factory` after `ssh-keygen -t ed25519` | 178 s, every factory check passed, battery module included |
+| `kdevm.sh up` | window open, Plasma logged in; all three bridge helpers running |
+| KWin | compositing on OpenGL, renderer `virgl (Apple M3 Pro)`, 4.1 core profile, Mesa 25.0.7 |
+| time zone, battery, share | America/New_York; `Mac Battery` 80%, pending-charge (the host is capped at 80%); `~/Mac` mounted over 9p |
+| failed units in the guest | none, system or user |
+| removal as the README gives it | `down`, then the three `rm -rf` paths: no kdevm process and no kdevm directory left |
+
+Notes:
+
+- The ssh key check came after the runtime build, so a first-time user
+  without a key waited for the build before being told. Fixed the same day:
+  `up` (when it has a factory to build), `factory` and `rebuild` ask for the
+  key first, and `rebuild` no longer drops the overlay before finding out.
+  Check: both verbs with no key and no runtime are refused over the key,
+  not over the build.
+- Outside the three directories the README names, the run left three files
+  in Swift's own package cache (`~/Library/Caches/org.swift.swiftpm`), the
+  empty shared folder and the checkout.
+- The scale hint was 1 from an ssh shell (the 1080p dummy plug) and 2 from
+  Terminal under Screen Sharing's high-performance virtual display; the
+  guest ran at scale 2.
+- Not tested there: sound, microphone, clipboard content, idle CPU (a
+  desktop watched through Screen Sharing is not an idle one).
+

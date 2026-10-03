@@ -119,6 +119,14 @@ else
   echo "SKIP  password generation (needs the staged runtime, qemu-img, mkisofs and the edk2 firmware: guest/build.sh checks for them first)"
 fi
 
+# A missing ssh key is refused before any runtime build (second-machine test,
+# 2026-10-03): with no runtime staged, a build attempt would be the offline refusal.
+mkdir -p "$T/nokey/rt" "$T/nokey/state"
+for verb in factory up; do
+  out=$(KDEVM_STATE="$T/nokey/state" KDEVM_RUNTIME_ROOT="$T/nokey/rt" KDEVM_SSH_PUB=/nonexistent ./kdevm.sh $verb 2>&1); rc=$?
+  if [[ $rc -ne 0 && "$out" == *"no ssh public key"* && "$out" != *"runtime build requested"* && "$out" != *"runtime missing"* ]]; then pass "$verb with no ssh key: refused before the runtime build"; else fail "$verb with no ssh key (rc=$rc): $out"; fi
+done
+
 # 3. factory --force refuses while an overlay exists (finding 3)
 if need_builder; then
   mkdir -p "$T/v3"; : > "$T/v3/factory.qcow2"; : > "$T/v3/work.qcow2"
