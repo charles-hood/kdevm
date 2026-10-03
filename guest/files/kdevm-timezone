@@ -1,7 +1,7 @@
 #!/usr/bin/python3 -I
 """kdevm: keep the guest's time zone equal to the Mac's.
 
-The host bridge (omarchy-vm-helper --bridge-native-timezone, supervised by
+The host bridge (omarchy-vm-helper --bridge-native-timezone, started by
 kdevm.sh) writes one JSON line, {"type": "timezone", "zone": "<IANA name>"},
 to this virtio port every five seconds. The zone is applied through
 timedatectl when it differs from the guest's, so Plasma's clock follows.

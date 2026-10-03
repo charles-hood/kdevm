@@ -175,8 +175,10 @@ fw_cfg opt/kdevm/*         <-- per-launch hints (scale)                     <-- 
 - **Lifecycle.** `kdevm.sh up` makes a qcow2 overlay on the factory, copies
   the UEFI variable template to a private file, queries the helper for the
   host audio sample rates, launches QEMU under a private umask, waits for
-  QMP, starts one supervisor that keeps the helper's bridges running beside
-  it (clipboard, time zone, battery), and sizes the window. `down`
+  QMP, starts one helper per bridge beside it (clipboard, time zone,
+  battery), each tracked by pid and start time as QEMU is, and sizes the
+  window. Nothing restarts a helper that exits: `status` reports it and the
+  next `down` and `up` bring it back. `down`
   asks the guest's systemd to power off over ssh (QMP's ACPI button does
   nothing useful under Plasma), QMP second, kill last.
 
@@ -203,8 +205,8 @@ fw_cfg opt/kdevm/*         <-- per-launch hints (scale)                     <-- 
 ## Roadmap
 
 try-omarchy's helper already carries the host half of each of these, and on
-the host one more bridge is now a few lines: a port and an entry for the
-supervisor. The guest half is the real work and differs every time. The
+the host one more bridge is now a few lines: a port and a name in the list
+of bridges. The guest half is the real work and differs every time. The
 battery side could be vendored verbatim, kernel module included; the time
 zone receiver had to be written, because theirs is tied to Omarchy's menus.
 Not started: audio device picker (choose the Mac output from Plasma's

@@ -76,25 +76,40 @@ else
   echo "SKIP  factory --force probe (no runtime staged)"
 fi
 
+# A bridge helper, as kdevm sees one: the runtime's helper binary running one
+# bridge on this state's socket. FH is set to the pid.
+mkdir -p "$T/fakert4/current/bin"; : > "$T/fakert4/current/bin/kdevm"
+printf '#!/bin/sh\ntrap '"'"'kill $c 2>/dev/null; exit 0'"'"' TERM\nsleep 120 & c=$!\nwait\n' > "$T/fakert4/current/bin/omarchy-vm-helper"; chmod +x "$T/fakert4/current/bin/"*
+fake_helper() { # state dir, bridge
+  "$T/fakert4/current/bin/omarchy-vm-helper" --bridge-native-$2 1 "$1/run/$2.sock" & FH=$!; sleep 0.3
+}
+k4() { local st=$1; shift; KDEVM_STATE="$st" KDEVM_RUNTIME_ROOT="$T/fakert4" ./kdevm.sh "$@"; } # state dir, verb...
+
 # 4. stale pid files are not trusted (finding 4): a sleeper must survive down/status
 mkdir -p "$T/v4"; sleep 120 & SL=$!
-echo $SL > "$T/v4/qemu.pid"; echo $SL > "$T/v4/bridges.pid"
-KDEVM_STATE="$T/v4" ./kdevm.sh down >/dev/null 2>&1
-KDEVM_STATE="$T/v4" ./kdevm.sh status >/dev/null 2>&1
+echo $SL > "$T/v4/qemu.pid"; echo $SL > "$T/v4/bridge-clipboard.pid"
+k4 "$T/v4" down >/dev/null 2>&1
+k4 "$T/v4" status >/dev/null 2>&1
 if kill -0 $SL 2>/dev/null; then pass "stale pid: unrelated process left alive"; else fail "stale pid: unrelated process was signalled"; fi
 [[ ! -e "$T/v4/qemu.pid" ]] && pass "stale qemu.pid removed" || fail "stale qemu.pid kept"
 kill $SL 2>/dev/null; wait $SL 2>/dev/null
-# 4b. a bridge pid whose process merely mentions kdevm (an editor) must not be signalled
-mkdir -p "$T/v4b"; ARGV0="vim /review/kdevm.sh" zsh -c 'sleep 120; :' & ED=$!; sleep 0.3
-echo "$ED $(proc_start $ED)" > "$T/v4b/bridges.pid"
-KDEVM_STATE="$T/v4b" ./kdevm.sh down >/dev/null 2>&1
-if kill -0 $ED 2>/dev/null; then pass "bridge pid: unrelated 'vim kdevm.sh' process left alive"; else fail "bridge pid: unrelated process was signalled"; fi
+# 4b. a bridge record whose pid now belongs to something else (a reused pid,
+#     an editor that mentions the helper) is never signalled, for any bridge
+mkdir -p "$T/v4b"; ARGV0="vim /review/omarchy-vm-helper --bridge-native-clipboard notes" zsh -c 'sleep 120; :' & ED=$!; sleep 0.3
+for b in clipboard battery timezone; do echo "$ED $(proc_start $ED)" > "$T/v4b/bridge-$b.pid"; done
+k4 "$T/v4b" down >/dev/null 2>&1
+if kill -0 $ED 2>/dev/null && [[ -z "$(ls "$T/v4b" | grep '^bridge-')" ]]; then pass "bridge records pointing at an unrelated process: process left alive, records dropped"; else fail "bridge record with a foreign pid (alive=$(kill -0 $ED 2>/dev/null && echo yes || echo no), records: $(ls "$T/v4b" | tr '\n' ' '))"; fi
 kill $ED 2>/dev/null; wait $ED 2>/dev/null
-# 4c. the real supervisor identity IS accepted (same argv[0] shape, same start time)
-mkdir -p "$T/v4c"; ARGV0="kdevm-bridge-supervisor 1" zsh -c 'sleep 120; :' & SV=$!; sleep 0.3
-echo "$SV $(proc_start $SV)" > "$T/v4c/bridges.pid"
-KDEVM_STATE="$T/v4c" ./kdevm.sh down >/dev/null 2>&1
-if kill -0 $SV 2>/dev/null; then fail "bridge pid: a genuine supervisor was not signalled"; else pass "bridge pid: genuine supervisor identity accepted and stopped"; fi
+# 4c. a real helper identity IS accepted (command line and start time) and stopped
+mkdir -p "$T/v4c"; fake_helper "$T/v4c" battery; SV=$FH
+echo "$SV $(proc_start $SV)" > "$T/v4c/bridge-battery.pid"
+k4 "$T/v4c" down >/dev/null 2>&1
+if kill -0 $SV 2>/dev/null || [[ -e "$T/v4c/bridge-battery.pid" ]]; then fail "bridge helper: a genuine helper was not stopped"; else pass "bridge helper: genuine identity accepted, stopped, record removed"; fi
+kill $SV 2>/dev/null; wait $SV 2>/dev/null
+#     ... but not under another bridge's record: the command line must be that bridge's
+fake_helper "$T/v4c" battery; SV=$FH; echo "$SV $(proc_start $SV)" > "$T/v4c/bridge-clipboard.pid"
+k4 "$T/v4c" down >/dev/null 2>&1
+if kill -0 $SV 2>/dev/null && [[ ! -e "$T/v4c/bridge-clipboard.pid" ]]; then pass "bridge helper: a battery helper under the clipboard record is not signalled"; else fail "bridge record matched the wrong bridge's helper"; fi
 kill $SV 2>/dev/null; wait $SV 2>/dev/null
 
 
@@ -145,21 +160,32 @@ st=$(TZ=America/New_York zsh -c "source $REPO/lib/kdevm-common.zsh; pid_state $S
 [[ -n "$rec" && "$st" == running ]] && pass "pid_state: a start time recorded in one time zone is recognised in another" || fail "process identity across time zones (record '$rec' gave '$st')"
 kill $SL5 2>/dev/null; wait $SL5 2>/dev/null
 
-# 4g. bridge supervisor whose start time cannot be inspected during down:
+# 4g. a bridge helper whose start time cannot be inspected during down:
 #     not signalled, record kept, reported (down exits 2), not converted to absent
-mkdir -p "$T/v4g"; ARGV0="kdevm-bridge-supervisor 1" zsh -c 'sleep 120; :' & SV2=$!; sleep 0.3
-echo "$SV2 $(proc_start $SV2)" > "$T/v4g/bridges.pid"
+mkdir -p "$T/v4g"; fake_helper "$T/v4g" clipboard; SV2=$FH
+echo "$SV2 $(proc_start $SV2)" > "$T/v4g/bridge-clipboard.pid"
 cat > "$T/fakebin2/ps" <<'EOF'
 #!/bin/sh
 for a in "$@"; do [ "$a" = "lstart=" ] && exit 1; done
 exec /bin/ps "$@"
 EOF
-out=$(PATH="$T/fakebin2:$PATH" KDEVM_STATE="$T/v4g" ./kdevm.sh down 2>&1); rc=$?
-if kill -0 $SV2 2>/dev/null && [[ -f "$T/v4g/bridges.pid" && $rc -eq 2 && "$out" == *"could not be verified"* && "$out" == *"tracking preserved"* ]]; then pass "supervisor unknown during down: not signalled, record kept, reported"; else fail "supervisor unknown during down (rc=$rc alive=$(kill -0 $SV2 2>/dev/null && echo yes || echo no) record=$([[ -f "$T/v4g/bridges.pid" ]] && echo kept || echo removed))"; fi
-out=$(KDEVM_STATE="$T/v4g" ./kdevm.sh down 2>&1); rc=$?
-if ! kill -0 $SV2 2>/dev/null && [[ ! -f "$T/v4g/bridges.pid" && $rc -eq 0 ]]; then pass "same supervisor with inspection working again: stopped, exit confirmed, record removed"; else fail "supervisor stop after recovery (rc=$rc)"; kill $SV2 2>/dev/null; fi
+out=$(PATH="$T/fakebin2:$PATH" k4 "$T/v4g" down 2>&1); rc=$?
+if kill -0 $SV2 2>/dev/null && [[ -f "$T/v4g/bridge-clipboard.pid" && $rc -eq 2 && "$out" == *"could not be verified"* && "$out" == *"tracking preserved"* ]]; then pass "helper unknown during down: not signalled, record kept, reported"; else fail "helper unknown during down (rc=$rc alive=$(kill -0 $SV2 2>/dev/null && echo yes || echo no) record=$([[ -f "$T/v4g/bridge-clipboard.pid" ]] && echo kept || echo removed))"; fi
+out=$(k4 "$T/v4g" down 2>&1); rc=$?
+if ! kill -0 $SV2 2>/dev/null && [[ ! -f "$T/v4g/bridge-clipboard.pid" && $rc -eq 0 ]]; then pass "same helper with inspection working again: stopped, exit confirmed, record removed"; else fail "helper stop after recovery (rc=$rc)"; kill $SV2 2>/dev/null; fi
 
-# 4h. status reports an UNKNOWN supervisor (record kept) in all three QEMU states.
+# 4j. a helper that does not end on SIGTERM (stopped, so the signal stays
+#     pending) keeps its record: down reports it and exits 2, and up refuses
+#     to start over it. Once it can run again, down confirms its exit.
+mkdir -p "$T/v4j"; fake_helper "$T/v4j" timezone; SV4=$FH
+echo "$SV4 $(proc_start $SV4)" > "$T/v4j/bridge-timezone.pid"; kill -STOP $SV4
+out=$(k4 "$T/v4j" down 2>&1); rc=$?
+if kill -0 $SV4 2>/dev/null && [[ -f "$T/v4j/bridge-timezone.pid" && $rc -eq 2 && "$out" == *"did not exit after SIGTERM; tracking preserved"* ]]; then pass "helper that will not end: record kept, down exits 2 and says so"; else fail "unstoppable helper during down (rc=$rc: $out)"; fi
+kill -CONT $SV4; sleep 0.5
+out=$(k4 "$T/v4j" down 2>&1); rc=$?
+if ! kill -0 $SV4 2>/dev/null && [[ ! -f "$T/v4j/bridge-timezone.pid" && $rc -eq 0 ]]; then pass "the same helper once it can run: exit confirmed, record removed"; else fail "helper after SIGCONT (rc=$rc)"; kill -9 $SV4 2>/dev/null; fi
+
+# 4h. status reports an UNKNOWN bridge helper (record kept) in all three QEMU states.
 #     A ps wrapper fails the start-time lookup only for the pid in KDEVM_TEST_UNKNOWN_PID.
 cat > "$T/fakebin2/ps" <<'EOF'
 #!/bin/sh
@@ -167,7 +193,7 @@ hit=0; for a in "$@"; do [ "$a" = "lstart=" ] && hit=1; done
 if [ "$hit" = 1 ] && [ -n "$KDEVM_TEST_UNKNOWN_PID" ]; then for a in "$@"; do [ "$a" = "$KDEVM_TEST_UNKNOWN_PID" ] && exit 1; done; fi
 exec /bin/ps "$@"
 EOF
-mkdir -p "$T/v4h" "$T/fakert4/current/bin"; : > "$T/fakert4/current/bin/kdevm"; : > "$T/fakert4/current/bin/omarchy-vm-helper"; chmod +x "$T/fakert4/current/bin/"*
+mkdir -p "$T/v4h"
 # Network isolation for this fixture: status probes the ssh port with `nc`
 # and, if it answers, runs diagnostics over `ssh`. Both are called by bare
 # name, so stubs first in PATH intercept every call; the stubs log and fail
@@ -176,12 +202,12 @@ mkdir -p "$T/netstub"
 printf '#!/bin/sh\necho "nc $*" >> "$KDEVM_TEST_NETLOG"; exit 1\n' > "$T/netstub/nc"
 printf '#!/bin/sh\necho "ssh $*" >> "$KDEVM_TEST_NETLOG"; exit 255\n' > "$T/netstub/ssh"
 chmod +x "$T/netstub/nc" "$T/netstub/ssh"; export KDEVM_TEST_NETLOG="$T/v4h/netlog"; : > "$KDEVM_TEST_NETLOG"
-ARGV0="kdevm-bridge-supervisor 1" zsh -c 'sleep 120; :' & SV3=$!; sleep 0.3
-echo "$SV3 $(proc_start $SV3)" > "$T/v4h/bridges.pid"
+fake_helper "$T/v4h" clipboard; SV3=$FH
+echo "$SV3 $(proc_start $SV3)" > "$T/v4h/bridge-clipboard.pid"
 st_ok=1
 check_status() { # label, expected qemu line fragment
   local out; out=$(PATH="$T/netstub:$T/fakebin2:$PATH" KDEVM_TEST_UNKNOWN_PID="${3:-$SV3}" KDEVM_STATE="$T/v4h" KDEVM_RUNTIME_ROOT="$T/fakert4" ./kdevm.sh status 2>&1)
-  if [[ "$out" == *"bridges: UNKNOWN"* && "$out" == *"$2"* && -f "$T/v4h/bridges.pid" ]] && kill -0 $SV3 2>/dev/null; then pass "status: supervisor UNKNOWN reported and record kept with QEMU $1"; else st_ok=0; fail "status with QEMU $1: $(echo "$out" | grep -E 'qemu:|bridge' | tr '\n' ' ')"; fi
+  if [[ "$out" == *"bridge clipboard: UNKNOWN: pid $SV3 "* && "$out" == *"$2"* && -f "$T/v4h/bridge-clipboard.pid" ]] && kill -0 $SV3 2>/dev/null; then pass "status: helper UNKNOWN reported and record kept with QEMU $1"; else st_ok=0; fail "status with QEMU $1: $(echo "$out" | grep -E 'qemu:|bridge' | tr '\n' ' ')"; fi
 }
 # (a) QEMU absent: no qemu.pid
 check_status absent "qemu: not running"
@@ -502,7 +528,8 @@ EOF
 #!/bin/sh
 case "$1" in
   --host-audio-frequency) echo 48000 ;;
-  --bridge-native-*) echo "$1 $2 $3 $$" >> "$KDEVM_STATE/helpers.log"; trap 'kill $c 2>/dev/null; exit 0' TERM; sleep 300 & c=$!; wait ;;
+  --bridge-native-*) [ "--bridge-native-$KDEVM_FAKE_HELPER_FAIL" = "$1" ] && exit 1
+     echo "$1 $2 $3 $$" >> "$KDEVM_STATE/helpers.log"; trap 'kill $c 2>/dev/null; exit 0' TERM; sleep 300 & c=$!; wait ;;
 esac
 EOF
   chmod +x "$F5/kdevm" "$F5/omarchy-vm-helper"
@@ -511,30 +538,36 @@ EOF
   k13() { PATH="$T/netstub:$PATH" KDEVM_STATE="$T/v13" KDEVM_RUNTIME_ROOT="$T/fakert5" KDEVM_FW_CODE="$T/v13/code.fd" KDEVM_FW_VARS="$T/v13/vars.fd" KDEVM_SHARE="$T/v13/share" KDEVM_WINDOW=keep ./kdevm.sh "$@" 2>&1; }
   helpers13() { pgrep -f "$F5/omarchy-vm-helper --bridge-native" | tr '\n' ' '; }
   logged13() { grep -c -- "^--bridge-native-$1 $FQ13 $T/v13/run/$1.sock " "$T/v13/helpers.log" 2>/dev/null; } # bridge -> starts on its socket for this QEMU
-  # 13a. default (mirror): the port is on the command line and both helpers run on their own sockets
+  rec13() { cut -d' ' -f1 "$T/v13/bridge-$1.pid" 2>/dev/null; } # bridge -> recorded helper pid
+  # 13a. default (mirror): the ports are on the command line and each helper runs on its own socket
   out=$(k13 up); rc=$?; FQ13=$(cut -d' ' -f1 "$T/v13/qemu.pid" 2>/dev/null); sleep 1.5
   argv=$(cat "$T/v13/fakeqemu.argv" 2>/dev/null)
-  if [[ $rc -eq 0 && "$argv" == *"socket,id=tz,path=$T/v13/run/timezone.sock,server=on,wait=off"* && "$argv" == *"chardev=tz,name=dev.tryomarchy.timezone"* && "$argv" == *"socket,id=bat,path=$T/v13/run/battery.sock,server=on,wait=off"* && "$argv" == *"chardev=bat,name=dev.tryomarchy.battery"* && "$(logged13 clipboard)" == 1 && "$(logged13 timezone)" == 1 && "$(logged13 battery)" == 1 ]]; then pass "up: time zone and battery ports on the QEMU command line; clipboard, time zone and battery helpers started on their sockets"; else fail "up with time zone mirroring (rc=$rc: $(echo "$out" | tail -2 | tr '\n' ' ') log: $(tr '\n' ';' < "$T/v13/helpers.log" 2>/dev/null))"; fi
-  out=$(k13 status)
-  [[ "$out" =~ '-- bridges: supervisor pid [0-9]+, clipboard helper [0-9]+, battery helper [0-9]+, time zone helper [0-9]+' ]] && pass "status: one supervisor, all three helpers reported by pid" || fail "status bridges line: $(echo "$out" | grep bridges)"
-  # 13b. a helper that dies is started again; the other one is left alone
-  tzp=$(pgrep -f -- "--bridge-native-timezone $FQ13 $T/v13/run/timezone.sock"); kill $tzp 2>/dev/null; sleep 2.5
-  tzp2=$(pgrep -f -- "--bridge-native-timezone $FQ13 $T/v13/run/timezone.sock")
-  [[ -n "$tzp" && -n "$tzp2" && "$tzp2" != "$tzp" && "$(logged13 timezone)" == 2 && "$(logged13 clipboard)" == 1 && "$(logged13 battery)" == 1 ]] && pass "supervisor: a dead time zone helper is restarted, the other helpers are not disturbed" || fail "helper restart (was '$tzp' now '$tzp2', log: $(tr '\n' ';' < "$T/v13/helpers.log"))"
-  # 13c. down (ssh stubbed out, so QMP): QEMU, supervisor and helpers gone, records and sockets removed
-  SV13=$(cut -d' ' -f1 "$T/v13/bridges.pid" 2>/dev/null)
+  if [[ $rc -eq 0 && "$argv" == *"socket,id=tz,path=$T/v13/run/timezone.sock,server=on,wait=off"* && "$argv" == *"chardev=tz,name=dev.tryomarchy.timezone"* && "$argv" == *"socket,id=bat,path=$T/v13/run/battery.sock,server=on,wait=off"* && "$argv" == *"chardev=bat,name=dev.tryomarchy.battery"* && "$(logged13 clipboard)" == 1 && "$(logged13 timezone)" == 1 && "$(logged13 battery)" == 1 ]]; then pass "up: time zone and battery ports on the QEMU command line; one helper per bridge started on its own socket"; else fail "up with time zone mirroring (rc=$rc: $(echo "$out" | tail -2 | tr '\n' ' ') log: $(tr '\n' ';' < "$T/v13/helpers.log" 2>/dev/null))"; fi
+  out=$(k13 status); c13=$(rec13 clipboard); b13=$(rec13 battery); t13=$(rec13 timezone)
+  if [[ -n "$c13" && -n "$b13" && -n "$t13" && "$out" == *"-- bridge clipboard: helper pid $c13"* && "$out" == *"-- bridge battery: helper pid $b13"* && "$out" == *"-- bridge timezone: helper pid $t13"* && "$(echo $(helpers13) | wc -w | tr -d ' ')" == 3 ]]; then pass "status: each of the three helpers reported by its recorded pid; no other process involved"; else fail "status bridge lines: $(echo "$out" | grep bridge | tr '\n' ';')"; fi
+  # 13b. nothing restarts a helper: one that dies is reported NOT RUNNING, the others are untouched
+  kill $t13 2>/dev/null; sleep 1.5; out=$(k13 status)
+  if ! kill -0 $t13 2>/dev/null && [[ "$out" == *"-- bridge timezone: NOT RUNNING"* && "$out" == *"-- bridge clipboard: helper pid $c13"* && "$out" == *"-- bridge battery: helper pid $b13"* && "$(logged13 timezone)" == 1 && -f "$T/v13/bridge-timezone.pid" ]]; then pass "a helper that dies is not restarted: status says NOT RUNNING, the other helpers are untouched, status changed nothing"; else fail "dead helper reporting: $(echo "$out" | grep bridge | tr '\n' ';')"; fi
+  # 13c. down (ssh stubbed out, so QMP): QEMU and every helper gone; records and sockets removed
   out=$(k13 down); rc=$?; sleep 0.5
-  if [[ $rc -eq 0 && -n "$SV13" && -z "$(helpers13)" && ! -e "$T/v13/qemu.pid" && ! -e "$T/v13/bridges.pid" && ! -e "$T/v13/run/timezone.sock" && ! -e "$T/v13/run/clipboard.sock" && ! -e "$T/v13/run/battery.sock" ]] && ! kill -0 "$FQ13" 2>/dev/null && ! kill -0 "$SV13" 2>/dev/null; then pass "down: QEMU, supervisor and all helpers gone; pid records and sockets removed"; else fail "down after bridges (rc=$rc helpers='$(helpers13)': $(echo "$out" | tail -2 | tr '\n' ' '))"; fi
+  if [[ $rc -eq 0 && -z "$(helpers13)" && ! -e "$T/v13/qemu.pid" && -z "$(ls "$T/v13" | grep '^bridge-.*pid')" && ! -e "$T/v13/run/timezone.sock" && ! -e "$T/v13/run/clipboard.sock" && ! -e "$T/v13/run/battery.sock" ]] && ! kill -0 "$FQ13" 2>/dev/null; then pass "down: QEMU and all helpers gone; pid records and sockets removed"; else fail "down after bridges (rc=$rc helpers='$(helpers13)': $(echo "$out" | tail -2 | tr '\n' ' '))"; fi
   # 13d. KDEVM_TIMEZONE=off: no port, no time zone helper, status says so
   : > "$T/v13/helpers.log"
   out=$(KDEVM_TIMEZONE=off k13 up); rc=$?; FQ13=$(cut -d' ' -f1 "$T/v13/qemu.pid" 2>/dev/null); sleep 1.5
   argv=$(cat "$T/v13/fakeqemu.argv" 2>/dev/null); st=$(KDEVM_TIMEZONE=off k13 status)
-  if [[ $rc -eq 0 && "$argv" != *timezone* && "$(logged13 clipboard)" == 1 && "$(logged13 battery)" == 1 && "$(grep -c timezone "$T/v13/helpers.log")" == 0 && ! -e "$T/v13/run/timezone.sock" && "$st" == *"time zone mirroring off"* ]]; then pass "KDEVM_TIMEZONE=off: no port, no time zone helper, status says mirroring off"; else fail "KDEVM_TIMEZONE=off (rc=$rc argv has timezone: $([[ "$argv" == *timezone* ]] && echo yes || echo no), log: $(tr '\n' ';' < "$T/v13/helpers.log"))"; fi
-  # 13e. SIGTERM to the supervisor while QEMU lives stops its helpers (they are not orphaned)
-  SV13=$(cut -d' ' -f1 "$T/v13/bridges.pid" 2>/dev/null); kill "$SV13" 2>/dev/null; sleep 2
-  if [[ -n "$SV13" && -z "$(helpers13)" ]] && ! kill -0 "$SV13" 2>/dev/null && kill -0 "$FQ13" 2>/dev/null; then pass "supervisor SIGTERM: its helpers stopped with it, QEMU untouched"; else fail "supervisor SIGTERM (helpers='$(helpers13)')"; fi
+  if [[ $rc -eq 0 && "$argv" != *timezone* && "$(logged13 clipboard)" == 1 && "$(logged13 battery)" == 1 && "$(grep -c timezone "$T/v13/helpers.log")" == 0 && ! -e "$T/v13/run/timezone.sock" && "$st" == *"-- bridge timezone: off"* && ! -e "$T/v13/bridge-timezone.pid" ]]; then pass "KDEVM_TIMEZONE=off: no port, no time zone helper or record, status says off"; else fail "KDEVM_TIMEZONE=off (rc=$rc argv has timezone: $([[ "$argv" == *timezone* ]] && echo yes || echo no), log: $(tr '\n' ';' < "$T/v13/helpers.log"))"; fi
+  # 13e. the VM ends without down (the guest powers itself off): helpers that
+  #      outlive it are stopped by the next up, by verified identity, before
+  #      new ones are recorded; then down is clean
+  c13=$(rec13 clipboard); b13=$(rec13 battery); kill "$FQ13" 2>/dev/null; sleep 0.5
+  out=$(k13 up); rc=$?; FQ13=$(cut -d' ' -f1 "$T/v13/qemu.pid" 2>/dev/null); sleep 1
+  if [[ $rc -eq 0 && -n "$c13" && -n "$b13" && "$(rec13 clipboard)" != "$c13" && "$(rec13 battery)" != "$b13" && -n "$(rec13 timezone)" && "$(echo $(helpers13) | wc -w | tr -d ' ')" == 3 ]] && ! kill -0 $c13 2>/dev/null && ! kill -0 $b13 2>/dev/null; then pass "up after the VM ended by itself: the two leftover helpers stopped, three new ones recorded"; else fail "up over leftover helpers (rc=$rc helpers='$(helpers13)': $(echo "$out" | tail -2 | tr '\n' ' '))"; fi
   out=$(k13 down); rc=$?
-  [[ $rc -eq 0 ]] && ! kill -0 "$FQ13" 2>/dev/null && pass "down with the supervisor already gone: clean exit" || fail "down after supervisor exit (rc=$rc)"
+  [[ $rc -eq 0 && -z "$(helpers13)" ]] && ! kill -0 "$FQ13" 2>/dev/null && pass "down afterwards: clean exit, no helper left" || fail "down after restart (rc=$rc helpers='$(helpers13)')"
+  # 13g. a helper that exits at once does not stop the desktop: up succeeds, status reports that bridge NOT RUNNING
+  out=$(KDEVM_FAKE_HELPER_FAIL=battery k13 up); rc=$?; sleep 1; st=$(k13 status)
+  if [[ $rc -eq 0 && "$st" == *"-- bridge battery: NOT RUNNING"* && "$st" == *"-- bridge clipboard: helper pid "* && "$st" == *"-- bridge timezone: helper pid "* ]]; then pass "a helper that exits at once: up still succeeds, status reports that bridge NOT RUNNING"; else fail "helper failing at start (rc=$rc: $(echo "$st" | grep bridge | tr '\n' ';'))"; fi
+  out=$(k13 down); rc=$?; [[ $rc -eq 0 && -z "$(helpers13)" ]] || fail "down after a failed helper (rc=$rc)"
   # 13f. any other value is refused before anything starts
   rm -f "$T/v13/fakeqemu.argv"
   out=$(KDEVM_TIMEZONE=utc k13 up); rc=$?

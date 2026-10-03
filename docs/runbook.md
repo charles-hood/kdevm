@@ -274,7 +274,8 @@ How it is wired:
 
 - Host: `up` adds a second port to the virtio-serial bus
   (`nr=8,name=dev.tryomarchy.timezone`, chardev socket `run/timezone.sock`)
-  and the supervisor runs `omarchy-vm-helper --bridge-native-timezone`
+  and the supervisor (removed in the 0.2.0 review; `up` now starts and
+  tracks each helper itself) runs `omarchy-vm-helper --bridge-native-timezone`
   beside the clipboard helper. The helper writes one JSON line,
   `{"type": "timezone", "zone": "America/New_York"}`, every five seconds and
   reads nothing from the guest.
@@ -436,14 +437,22 @@ was checked here before anything was changed.
 |---|---|---|---|
 | 1 | updating with a 0.1 VM running: `destroy`/`rebuild` unlink the live overlay | reproduced on 5763b80 with a 0.1-style record and a live process: overlay removed | fixed: `refuse_if_stray` in `down` (so `destroy` and `rebuild` inherit it) and `up`; fixed-string match on the process table |
 | 2 | UPower shuts the guest down at a critical battery level | reproduced: 1% discharging, powered off after 22 s; `GetCriticalAction` said `PowerOff` | fixed: `CriticalPowerAction=Ignore` in `UPower.conf`, checked by the factory build; still up after 80 s live and on a cold boot of a rebuilt factory |
-| 3 | supervisor can signal a reused helper pid | by reading: the helper table holds bare pids | open: design decision (the supervisor itself) |
-| 4 | supervisor exit taken as proof its helpers ended | by reading | open: same decision |
+| 3 | supervisor can signal a reused helper pid | by reading: the helper table held bare pids | fixed by deletion: no supervisor; each helper has its own "pid start-time" record, checked against its command line |
+| 4 | supervisor exit taken as proof its helpers ended | by reading | fixed by deletion: `down` confirms each helper's exit; one that will not end keeps its record, `down` exits 2 |
 | 5 | concurrent runtime builds can stage `kdevm` beside an unrebranded helper | by reading; needs two builds at once | fixed: `zsystem flock` on the runtime root and on the scratch checkout |
 | 6 | `KDEVM_TIMEZONE` validated after the runtime and factory builds | by reading | fixed: validated first |
 | 7 | battery seed check runs when PyYAML is absent | by reading | fixed: inside the conditional |
-| 8 | helper lookup for `status` is a regex over the socket path | by reading | open: goes away or is fixed with 3 and 4 |
+| 8 | helper lookup for `status` is a regex over the socket path | by reading | fixed by deletion: `status` reads the records; the command-line pattern quotes its literal parts |
 | 9 | Dock icon temp file shared by state directories on one runtime | by reading; cosmetic | fixed: per-process name |
 
+- The supervisor (3, 4, 8) was Charles's call: delete it. The bridge
+  helpers are now handled by the pid-record code the 0.1.0 review hardened,
+  one record per bridge. What is given up is restart: a helper that exits
+  stays down, `status` prints `NOT RUNNING` for that bridge, and the next
+  `down` and `up` restore it. On the real VM the three helpers end by
+  themselves within two seconds of QEMU exiting (guest powered off from
+  inside, no `down`); their records are dropped by the next `up` or `down`,
+  and `status` itself no longer changes anything.
 - UPower 1.90.9 does not read `/etc/UPower/UPower.conf.d/`: a drop-in there
   changed nothing (`GetCriticalAction` still `PowerOff`). The main file has
   to be edited, and `Ignore` needs `AllowRiskyCriticalPowerAction=true`.

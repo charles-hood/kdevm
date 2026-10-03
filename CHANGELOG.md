@@ -19,7 +19,13 @@ fixes so far:
   first one's rebrand under its compiler.
 - `KDEVM_TIMEZONE` is validated before anything is built; the rendered-seed
   checks are skipped together when PyYAML is missing; the Dock icon is built
-  under a name no other `up` shares. Five more offline checks (70 in all).
+  under a name no other `up` shares.
+- The bridge supervisor written for this release is gone (see below): the
+  review found that it tracked its helpers by bare pid and that its own exit
+  was taken as proof that they had ended. Each helper now has a full
+  identity record of its own, a helper that will not end keeps its record
+  and makes `down` exit 2, and `status` no longer searches the process table
+  by socket path. 74 offline checks in all.
 
 - Battery mirroring: the Mac's battery appears in the guest as a real
   `BAT0`/`ADP0` (charge, state, time estimates, cycle count), so UPower and
@@ -64,14 +70,16 @@ fixes so far:
   pinned to UTC and the C locale. Update with the VM stopped: a VM that is
   running across the update is no longer recognised; kdevm refuses to treat
   it as stopped and it has to be powered off from inside the guest.
-- One supervisor now runs every host bridge (clipboard, time zone), restarts
-  a helper that exits, and stops its helpers when it is stopped. Its files
-  are `bridges.pid` and `bridges.log` (an old `clipboard-bridge.log` in the
-  state directory can be deleted), and `status` reports one `bridges` line
-  with each helper's pid. The supervisor had been running in zsh's ksh
-  emulation because its process name starts with "k"; it now selects zsh.
-  Twelve more offline checks (63 in all), nine of them a first end-to-end
-  run of `up`, `status` and `down` against a fake QEMU that answers QMP.
+- Host bridges are tracked one by one. `up` starts one helper per bridge
+  (clipboard, battery, time zone) and gives each its own record,
+  `bridge-<name>.pid`, checked by command line and start time exactly as
+  QEMU's is; `status` has a line per bridge and `down` confirms each exit.
+  0.1.0 ran the clipboard helper in a restart loop under a supervisor
+  process (which, it turned out, had been running in zsh's ksh emulation
+  because its name starts with "k"). There is no supervisor now and nothing
+  restarts a helper: one that exits is reported `NOT RUNNING` and comes back
+  with the next `down` and `up`. An old `clipboard-bridge.log` in the state
+  directory can be deleted.
 
 - Dock icon: `kdevm.sh up` builds `TryOmarchy.icns` in the runtime root from
   `assets/kdevm-icon.png` (or the square PNG named by `KDEVM_ICON`), which is

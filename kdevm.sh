@@ -55,9 +55,15 @@ CLIP="$RUN/clipboard.sock"
 TZSOCK="$RUN/timezone.sock"
 BATSOCK="$RUN/battery.sock"
 SOCKETS=("$QMP" "$CLIP" "$TZSOCK" "$BATSOCK")
+# Host bridges: name -> the socket QEMU serves for it. One helper process per
+# bridge, started by up; each has its own record, bridge-<name>.pid, holding
+# "pid start-time" and checked against the helper's command line, exactly as
+# QEMU's record is. No process supervises them.
+typeset -A BRIDGE_SOCK
+BRIDGE_SOCK=(clipboard "$CLIP" battery "$BATSOCK" timezone "$TZSOCK")
+BRIDGE_NAMES=(clipboard battery timezone)
 SERIAL="$STATE/serial.log"
 PIDFILE="$STATE/qemu.pid"
-BRIDGEPID="$STATE/bridges.pid"       # the one supervisor of every host bridge
 KNOWN_HOSTS="$STATE/known_hosts"
 SSH_OPTS=(-p "$SSH_PORT" -o UserKnownHostsFile="$KNOWN_HOSTS" -o StrictHostKeyChecking=no
           -o LogLevel=ERROR -o ConnectTimeout=5)
@@ -66,7 +72,6 @@ source "$REPO/guest/factory.zsh"
 trap kdevm_factory_cleanup EXIT   # script scope; a no-op unless a build started
 
 QEMU_PATTERN="*${QEMU}*file=${WORK}*"
-BRIDGE_PATTERN="kdevm-bridge-supervisor *"
 # qemu_state -> running | unknown | absent (see pid_state in the library).
 # An absent record is discarded; an unknown one is KEPT so a later command
 # cannot mistake "could not inspect" for "gone".
@@ -77,37 +82,38 @@ qemu_pid() {
   case $st in running) echo "$PF_PID" ;; absent) rm -f "$PIDFILE" ;; esac
 }
 running() { [[ "$(qemu_state)" == running ]]; }
-bridge_pid() {
-  local PF_PID PF_START st; read_pidfile "$BRIDGEPID" || return 0
-  st=$(pid_state "$PF_PID" "$PF_START" "$BRIDGE_PATTERN")
-  case $st in running) echo "$PF_PID" ;; absent) rm -f "$BRIDGEPID" ;; esac
+bridge_record() { echo "$STATE/bridge-$1.pid"; } # name
+# The helper's command line for one bridge; (b) quotes the literal parts so a
+# path cannot act as a pattern. The QEMU pid in the middle is not pinned: the
+# record's own pid and start time identify the process.
+bridge_pattern() { echo "*${(b)HELPER} --bridge-native-$1 * ${(b)BRIDGE_SOCK[$1]}"; } # name
+bridge_state() { # name -> running | unknown | absent
+  local PF_PID PF_START; read_pidfile "$(bridge_record $1)" || { echo absent; return 0; }
+  pid_state "$PF_PID" "$PF_START" "$(bridge_pattern $1)"
 }
-# Pid of the helper running one bridge on this state's socket, else "not-running".
-helper_pid() { pgrep -f -- "--bridge-native-$1 [0-9]+ $2\$" | head -1 || echo not-running; } # bridge, socket
-bridge_state() { local PF_PID PF_START; read_pidfile "$BRIDGEPID" || { echo absent; return 0; }; pid_state "$PF_PID" "$PF_START" "$BRIDGE_PATTERN"; }
-# Stop the bridge supervisor (it stops its helpers) with the same tri-state
-# rules as QEMU:
+# Stop one bridge helper with the same tri-state rules as QEMU:
 # running -> signal, remove the record only after the exit is confirmed;
 # absent  -> remove the stale record;
 # unknown -> signal nothing, keep the record, say so. Returns 1 when the
 # record had to be preserved (unknown, or no confirmed exit).
-stop_bridge() {
-  local PF_PID PF_START st i
-  read_pidfile "$BRIDGEPID" || return 0
-  st=$(pid_state "$PF_PID" "$PF_START" "$BRIDGE_PATTERN")
+stop_bridge() { # name
+  local PF_PID PF_START st i rec; rec=$(bridge_record $1)
+  read_pidfile "$rec" || return 0
+  st=$(pid_state "$PF_PID" "$PF_START" "$(bridge_pattern $1)")
   case $st in
     running)
       kill "$PF_PID" 2>/dev/null || true
       for i in {1..25}; do kill -0 "$PF_PID" 2>/dev/null || break; sleep 0.2; done
       if kill -0 "$PF_PID" 2>/dev/null; then
-        log "bridge supervisor pid $PF_PID did not exit after SIGTERM; tracking preserved"; return 1
+        log "$1 bridge helper pid $PF_PID did not exit after SIGTERM; tracking preserved"; return 1
       fi
-      rm -f "$BRIDGEPID" ;;
-    absent)  rm -f "$BRIDGEPID" ;;
-    unknown) log "bridge supervisor pid $PF_PID could not be verified (process inspection failed); not signalled, tracking preserved"; return 1 ;;
+      rm -f "$rec" ;;
+    absent)  rm -f "$rec" ;;
+    unknown) log "$1 bridge helper pid $PF_PID could not be verified (process inspection failed); not signalled, tracking preserved"; return 1 ;;
   esac
   return 0
 }
+stop_bridges() { local rc=0 n; for n in $BRIDGE_NAMES; do stop_bridge $n || rc=1; done; return $rc; }
 # A QEMU that has this state's overlay open but that the pid record does not
 # vouch for (record lost, written by an older kdevm, identity check failed)
 # must not be started beside, and its disks must not be removed from under
@@ -207,13 +213,16 @@ up() {
   [[ -f "$EFIVARS" ]] || cp "$FW_VARS_TEMPLATE" "$EFIVARS"
   chmod 600 "$WORK" "$EFIVARS" "$FACTORY" 2>/dev/null || true
   refuse_if_stray "start another"
+  # A helper left from an earlier run (the guest powered itself off, so down
+  # never ran) is stopped and its record dropped before new ones are written.
+  stop_bridges || die "a bridge helper from an earlier run is still tracked and could not be stopped (kdevm.sh status); refusing to start"
   rm -f "${SOCKETS[@]}"
   install_icon || log "warning: could not build the Dock icon from ${KDEVM_ICON:-$REPO/assets/kdevm-icon.png}; the Dock icon is unchanged"
   # The helper's bridges accept only a socket owned by this uid with no
   # group/other bits (NativeBridgeSocket.swift); the script-wide umask 077
   # makes QEMU create them that way.
   local out_hz in_hz scale xres yres
-  # Host bridges, as "helper mode, socket" pairs for the supervisor below.
+  # Host bridges to start once QEMU is up (names; see BRIDGE_SOCK).
   # Time zone: a second virtio port the helper writes the Mac's zone to every
   # five seconds; the guest's kdevm-timezone service (started by udev when
   # the port exists) applies it. Off: no port, so nothing runs on either side.
@@ -221,9 +230,9 @@ up() {
   # feeds it to a kernel module that presents BAT0/ADP0 (a Mac without a
   # battery shows as mains only).
   local -a bridges tzdev
-  bridges=(--bridge-native-clipboard "$CLIP" --bridge-native-battery "$BATSOCK")
+  bridges=(clipboard battery)
   if [[ "$TIMEZONE" == mirror ]]; then
-    bridges+=(--bridge-native-timezone "$TZSOCK")
+    bridges+=(timezone)
     tzdev=(-chardev "socket,id=tz,path=$TZSOCK,server=on,wait=off"
            -device virtserialport,bus=vser.0,nr=8,chardev=tz,name=dev.tryomarchy.timezone)
   fi
@@ -299,40 +308,27 @@ up() {
     cat "$STATE/qemu.out" >&2
     die "QEMU failed to start (see above)"
   fi
-  # Host bridges: their helper, one process per bridge, supervised while QEMU
-  # lives (as their launcher does). A helper that exits is started again
-  # within a second; SIGTERM to the supervisor stops its helpers, and so does
-  # the end of QEMU. The supervisor is its own zsh process with a distinctive
-  # argv[0] (ARGV0) so bridge_pid() can recognise it, with stdio detached so
-  # no inherited pipe stays open until QEMU exits. Two zsh facts it depends
-  # on: zsh picks an emulation from the first letter of argv[0] and "k" is
-  # ksh, hence emulate; and a bare $! is not expanded on the right of an
-  # array-element assignment, hence ${!}.
-  ARGV0="kdevm-bridge-supervisor $pid" zsh -c '
-    emulate -R zsh
-    helper=$1; qpid=$2; logf=$3; shift 3
-    typeset -A hp
-    stop_helpers() { local p; for p in ${(v)hp}; do kill $p 2>/dev/null; done }
-    TRAPTERM() { stop_helpers; exit 0 }
-    while kill -0 "$qpid" 2>/dev/null; do
-      for mode sock in "$@"; do
-        [[ -n "${hp[$mode]:-}" ]] && kill -0 "${hp[$mode]}" 2>/dev/null && continue
-        "$helper" "$mode" "$qpid" "$sock" >>"$logf" 2>&1 &
-        hp[$mode]=${!}
-      done
-      sleep 1
-    done
-    stop_helpers' kdevm-bridge-supervisor "$HELPER" "$pid" "$STATE/bridges.log" "${bridges[@]}" </dev/null >/dev/null 2>&1 {KDEVM_LOCK_FD}<&- &
-  local spid=$! sstart
-  sstart=$(proc_start $spid) || sstart=""
-  if [[ -n "$sstart" ]]; then
-    echo "$spid $sstart" > "$BRIDGEPID"
-  else
-    # An untrackable supervisor is not left behind: stop it; the desktop
-    # keeps running without its bridges and status says so.
-    kill $spid 2>/dev/null || true; rm -f "$BRIDGEPID"
-    log "warning: could not record the bridge supervisor's start time; bridges stopped (no clipboard sharing or time zone mirroring this session)"
-  fi
+  # Host bridges: their helper, one process per bridge, started here and
+  # tracked like QEMU (pid and start time, checked against its command line).
+  # Nothing supervises them: a helper that exits stays down until the next
+  # up, and status says so. A helper ends by itself when QEMU closes its
+  # socket; down stops any that has not. stdio is detached so no inherited
+  # pipe stays open until QEMU exits.
+  local name hp hstart
+  for name in $bridges; do
+    "$HELPER" --bridge-native-$name "$pid" "${BRIDGE_SOCK[$name]}" </dev/null >>"$STATE/bridges.log" 2>&1 {KDEVM_LOCK_FD}<&- &
+    hp=$!; hstart=$(proc_start $hp) || hstart=""
+    if [[ -n "$hstart" ]]; then
+      echo "$hp $hstart" > "$(bridge_record $name)"
+    elif kill -0 $hp 2>/dev/null; then
+      # Our own child, this instant: stopping it by pid is safe. An
+      # untrackable helper is not left behind.
+      kill $hp 2>/dev/null || true
+      log "warning: could not record the $name bridge helper's start time; it was stopped (no $name bridge this session)"
+    else
+      log "warning: the $name bridge helper exited at once (see $STATE/bridges.log); no $name bridge this session"
+    fi
+  done
   # Window size: KScreen restores the guest's last mode and the Cocoa window
   # follows the guest, so the first window can come up small (492x277 points
   # seen). Once the window exists, size it to the display minus margins; the
@@ -359,9 +355,9 @@ down() {
     # "Not running" is only true if nothing has the overlay open. destroy and
     # rebuild come through here before they remove anything.
     refuse_if_stray "treat the VM as stopped"
-    # No QEMU: a verified supervisor of ours (if any lingers) is stopped too;
+    # No QEMU: a verified helper of ours (if any lingers) is stopped too;
     # an unverifiable one keeps its record and down reports it (exit 2).
-    local brc=0; stop_bridge || brc=$?
+    local brc=0; stop_bridges || brc=$?
     rm -f "$PIDFILE"; log "not running"
     [[ $brc -eq 0 ]] || return 2
     return 0
@@ -379,7 +375,7 @@ down() {
   fi
   for i in {1..45}; do kill -0 "$pid" 2>/dev/null || break; sleep 1; done
   if kill -0 "$pid" 2>/dev/null; then log "guest did not power off in 45 s; terminating"; kill "$pid" 2>/dev/null || true; sleep 2; kill -9 "$pid" 2>/dev/null || true; fi
-  local brc=0; stop_bridge || brc=$?
+  local brc=0; stop_bridges || brc=$?
   rm -f "$PIDFILE" "${SOCKETS[@]}"
   log "stopped (overlay kept; 'up' resumes it)"
   [[ $brc -eq 0 ]] || return 2
@@ -446,14 +442,20 @@ status() {
         'echo "-- guest: $(uname -r), seat session $(loginctl show-session $(loginctl list-sessions --no-legend | awk "\$4==\"seat0\"{print \$1; exit}") -p Type --value 2>/dev/null || echo none), uptime $(uptime -p)"' 2>/dev/null || echo "-- guest: ssh not accepting the key yet"
     else echo "-- ssh: localhost:$SSH_PORT not answering"; fi
   else echo "-- qemu: not running"; fi
-  # The bridge supervisor is reported independently of the QEMU state:
-  # running (no change), unknown (record preserved, nothing signalled),
-  # absent (bridge_pid drops the stale record; nothing to report).
-  case "$(bridge_state)" in
-    running) echo "-- bridges: supervisor pid $(bridge_pid), clipboard helper $(helper_pid clipboard "$CLIP"), battery helper $(helper_pid battery "$BATSOCK"), time zone $([[ -S "$TZSOCK" ]] && echo "helper $(helper_pid timezone "$TZSOCK")" || echo "mirroring off")" ;;
-    unknown) echo "-- bridges: UNKNOWN: supervisor pid $(head -1 "$BRIDGEPID" | cut -d' ' -f1) could not be inspected; tracking preserved, nothing signalled" ;;
-    absent)  bridge_pid >/dev/null ;;
-  esac
+  # Each bridge helper is reported independently of the QEMU state: running;
+  # UNKNOWN (record preserved, nothing signalled); or, with QEMU up, absent
+  # (it exited and nothing restarts it) or never started (no socket: off).
+  # status changes nothing: a stale record is dropped by the next up or down.
+  local n PF_PID PF_START
+  for n in $BRIDGE_NAMES; do
+    case "$(bridge_state $n)" in
+      running) read_pidfile "$(bridge_record $n)"; echo "-- bridge $n: helper pid $PF_PID" ;;
+      unknown) read_pidfile "$(bridge_record $n)"; echo "-- bridge $n: UNKNOWN: pid $PF_PID could not be inspected; tracking preserved, nothing signalled" ;;
+      absent)  [[ "$qs" == running ]] || continue
+               if [[ -S "${BRIDGE_SOCK[$n]}" ]]; then echo "-- bridge $n: NOT RUNNING (its helper exited; down and up restore it; see $STATE/bridges.log)"
+               else echo "-- bridge $n: off"; fi ;;
+    esac
+  done
 }
 
 case "${1:-}" in
