@@ -51,9 +51,9 @@ Env: `KDEVM_CPUS` (4), `KDEVM_MEM_MB` (8192), `KDEVM_SCALE` (auto, 1, 2),
 
 | | desktop-kde-local (container) | kdevm (this) |
 |---|---|---|
-| Image / factory build | ~80 s | ~10 min (apt over WAN) |
-| Start | ~3 s | UEFI, kernel, sddm: see runbook |
-| Idle host CPU | near 0 | see runbook |
+| Image / factory build | ~80 s | ~110 s |
+| Start | ~3 s | 14 s to a logged-in desktop |
+| Idle host CPU | near 0 | ~7% of one core |
 | Memory | 6 GB cap | 8 GB nominal, unused pages returned to macOS |
 | Session | X11, compositing off, RDP client, greeter | Wayland, GPU compositing, native window |
 | Sound | PipeWire over RDP channel, out only | HDA, out and mic |

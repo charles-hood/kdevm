@@ -187,8 +187,9 @@ libva error`), which is the architecture's known limit: video decodes on the
 CPU, and smooth 1080p playback is the acceptance bar, not hardware decode.
 No Chrome GPU fallback flag was needed.
 
-Still Charles's to call: video playback with sound, mic in a browser,
-two-finger scroll, pinch, drag-resize feel, Firefox.
+Charles, 2026-10-02 22:50: **"mic works, youtube with sound works too."**
+Milestone 3 met on the three things that could have failed (GPU, sound
+out, mic in). Not separately reported yet: pinch, Firefox.
 
 ## Phase 4: clipboard and shared folder
 
