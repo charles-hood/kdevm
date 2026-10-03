@@ -1,13 +1,24 @@
 # Changelog
 
-## Unreleased
+## 0.2.1 (2026-10-03)
+
+A first-run release: what a newcomer meets between `git clone` and a
+desktop. kdevm was installed on a second Mac by following the README, and
+this is what that turned up. No new features.
+
+### Upgrading from 0.2.0
+
+Update the checkout, with the VM stopped as for any update. Nothing needs
+rebuilding: the runtime pin and the guest are unchanged.
+
+### Changed
 
 - **The scripts ignore your shell startup files.** `kdevm.sh`, both build
   scripts and the checks now start as `/bin/zsh -f`. Before, a `~/.zshenv`
   that defined aliases (`rm -i`, a coloured `grep`) or set options such as
   `KSH_ARRAYS` or `NO_CLOBBER` changed how they ran; with those options
   nothing ran at all. Found by running the checks under such a file; they
-  pass 98 of 98 with and without one.
+  pass with and without one.
 - **A missing ssh key is reported before anything is built.** `up`,
   `factory` and `rebuild` used to build the runtime (two minutes) and only
   then say that no ssh public key was found; `rebuild` had dropped the
