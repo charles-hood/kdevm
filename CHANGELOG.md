@@ -71,7 +71,20 @@ fixes so far:
   Upgrading section; checks that need the builder's tools are skipped
   without them; several checks were strengthened so that removing the
   behaviour they name makes them fail; and the tests end only processes
-  they started, by pid. 96 offline checks in all.
+  they started, by pid.
+- Third closure pass (commit 0c402b5), both reviewers again: nineteen and
+  twenty of twenty-two items met, and nothing that can cost data. Fixed: a
+  state directory with pattern characters in its name (`[`, `*`) is matched
+  as literal text; a failed factory build leaves its disk and vars copy
+  alone if the provisioning VM cannot be confirmed stopped; a launcher gives
+  up by itself after four seconds; U+FFFE and U+FFFF are escaped in the
+  seed. Found while fixing: inside its own EXIT trap zsh reported success
+  for a failed command substitution, so the identity check read an exited
+  process as present; it now reads `kill`'s words, not its status. Left as
+  stated limits: the factory build's `pgrep` guard can be tripped by a
+  process that only names the disk (it fails closed), and a launcher frozen
+  for longer than its caller waits could still register in the instant
+  after a later `destroy` has checked the disk. 98 offline checks in all.
 
 - Battery mirroring: the Mac's battery appears in the guest as a real
   `BAT0`/`ADP0` (charge, state, time estimates, cycle count), so UPower and

@@ -28,9 +28,16 @@ kdevm_factory_vm_alive() {
 kdevm_factory_cleanup() {
   set +e
   if [[ $F_OWNED -eq 1 ]]; then
-    [[ -n "$F_REC" ]] && stop_tracked "$F_REC" "$F_PAT" "provisioning QEMU" kill
-    [[ -n "$F_WORK" && -f "$F_WORK" ]] && mv -f "$F_WORK" "$FACTORY.failed" 2>/dev/null
-    rm -f "$F_PROV_VARS" "$STATE/seed.iso" 2>/dev/null
+    # The seed holds the plaintext password and goes in every case. The disk
+    # and the vars copy are touched only once the provisioning VM is
+    # confirmed gone: one that could not be verified may still have them open.
+    rm -f "$STATE/seed.iso" 2>/dev/null
+    if [[ -z "$F_REC" ]] || stop_tracked "$F_REC" "$F_PAT" "provisioning QEMU" kill; then
+      [[ -n "$F_WORK" && -f "$F_WORK" ]] && mv -f "$F_WORK" "$FACTORY.failed" 2>/dev/null
+      rm -f "$F_PROV_VARS" 2>/dev/null
+    else
+      echo "the provisioning QEMU could not be confirmed stopped; $F_WORK and $F_PROV_VARS are left in place" >&2
+    fi
     [[ -n "$F_SEED_DIR" ]] && rm -rf "$F_SEED_DIR"
   fi
   return 0
@@ -121,7 +128,7 @@ def scalar(value):
     # What json.dumps leaves raw but YAML does not accept or does not keep
     # (DEL, the C1 controls, the Unicode line and paragraph separators) is
     # written as an escape, which both read back as the same character.
-    return re.sub("[\x7f-\x9f\u2028\u2029]", lambda m: "\\u%04x" % ord(m.group()), json.dumps(value, ensure_ascii=False))
+    return re.sub("[\x7f-\x9f\u2028\u2029\ufffe\uffff]", lambda m: "\\u%04x" % ord(m.group()), json.dumps(value, ensure_ascii=False))
 values = {
     "USER": os.environ["KDEVM_USER_NAME"],
     "PASS": scalar(os.environ["KDEVM_PASS"]),
@@ -156,7 +163,7 @@ PY
   : > "$F_SERIAL"
   rm -f "$KNOWN_HOSTS"
   flog "booting headless for provisioning (serial: $F_SERIAL)"
-  F_REC="$STATE/factory-qemu.pid"; F_PAT="*${QEMU}*file=${F_WORK}*"
+  F_REC="$STATE/factory-qemu.pid"; F_PAT="*${(b)QEMU}*file=${(b)F_WORK}*"
   stop_tracked "$F_REC" "$F_PAT" "provisioning QEMU" kill || die "a provisioning QEMU from an earlier build could not be stopped; see $F_REC"
   launch_tracked "$F_REC" "$STATE/factory-qemu.out" "$QEMU" \
     -machine virt,accel=hvf,gic-version=3 -cpu host,pmu=off \

@@ -302,6 +302,19 @@ stop_tracked "$T/v4k/a.pid" '*sleep 4141' "test process" >/dev/null 2>&1
 stop_tracked "$T/v4k/b.pid" '*sleep 4343' "test process" >/dev/null 2>&1
 end_own "$D_PID" "/bin/sh $T/v4k/deaf marker-4545"
 
+# 4m. a state directory whose name has pattern characters in it: the QEMU and
+#     helper identities are matched as literal text (status sees the QEMU,
+#     down stops the genuine helper)
+ST4M="$T/v4m [1]*"; mkdir -p "$ST4M"
+ARGV0="$T/fakert4/current/bin/kdevm -drive file=$ST4M/work.qcow2" zsh -c 'sleep 120; :' & FQ3=$!; sleep 0.3
+echo "$FQ3 $(proc_start $FQ3)" > "$ST4M/qemu.pid"
+fake_helper "$ST4M" battery; SV5=$FH; echo "$SV5 $(proc_start $SV5)" > "$ST4M/bridge-battery.pid"
+out=$(k4 "$ST4M" status 2>&1)
+if [[ "$out" == *"qemu: pid $FQ3"* && "$out" == *"bridge battery: helper pid $SV5"* ]]; then pass "identity with pattern characters in the state path: QEMU and helper recognised as literal text"; else fail "pattern characters in the state path ($(echo "$out" | grep -E 'qemu:|bridge' | tr '\n' ' '))"; fi
+kill $FQ3 2>/dev/null; wait $FQ3 2>/dev/null
+out=$(k4 "$ST4M" down 2>&1); rc=$?
+if [[ $rc -eq 0 ]] && ! kill -0 $SV5 2>/dev/null; then pass "the helper under that path is stopped by down"; else fail "down under a path with pattern characters (rc=$rc: $out)"; kill $SV5 2>/dev/null; fi
+
 # 4h. status reports an UNKNOWN bridge helper (record kept) in all three QEMU states.
 #     A ps wrapper fails the start-time lookup only for the pid in KDEVM_TEST_UNKNOWN_PID.
 cat > "$T/fakebin2/ps" <<'EOF'
@@ -371,12 +384,12 @@ wait $LH2 2>/dev/null
 if [[ -x .venv/bin/python ]] && .venv/bin/python -c 'import yaml' 2>/dev/null; then
   awk "/<<'PY'\$/{f=1; next} f && /^PY\$/{exit} f" guest/factory.zsh > "$T/render.py"
   ok=1
-  for pw in '&secret' '|secret' 'abc #secret' '12345678' 'q"uo\te' "it's" '{a: b}' '- dash' 'tab	here' ' leading space' 'üñî©ødé' '\\backslash' 'a\nb' 'pass🔑word' '@@SSHKEY@@' '@@USER@@ @@PASS@@' '@@B64:files/kdevm-timezone@@' 'a@@b@@c' $'del\x7fchar' $'c1\xc2\x80char' $'line\xe2\x80\xa8  sep'; do
+  for pw in '&secret' '|secret' 'abc #secret' '12345678' 'q"uo\te' "it's" '{a: b}' '- dash' 'tab	here' ' leading space' 'üñî©ødé' '\\backslash' 'a\nb' 'pass🔑word' '@@SSHKEY@@' '@@USER@@ @@PASS@@' '@@B64:files/kdevm-timezone@@' 'a@@b@@c' $'del\x7fchar' $'c1\xc2\x80char' $'line\xe2\x80\xa8  sep' $'non\xef\xbf\xbechar' $'non\xef\xbf\xbfchar'; do
     KDEVM_USER_NAME=tester KDEVM_PASS="$pw" KDEVM_SSHKEY='ssh-ed25519 AAAATEST comment #with: odd & chars' \
       python3 "$T/render.py" guest/user-data.yaml.tmpl "$T/ud.yaml" guest || { ok=0; continue; }
     KDEVM_PASS="$pw" .venv/bin/python -c 'import yaml,os,sys; d=yaml.safe_load(open(sys.argv[1])); u=d["users"][0]; sys.exit(0 if u["plain_text_passwd"]==os.environ["KDEVM_PASS"] and u["ssh_authorized_keys"][0]=="ssh-ed25519 AAAATEST comment #with: odd & chars" else 1)' "$T/ud.yaml" || { ok=0; echo "      password case failed: ${(q)pw}"; }
   done
-  [[ $ok -eq 1 ]] && pass "21 hostile passwords (incl. non-BMP, four that look like template tokens, DEL, a C1 control and U+2028) and a hostile key round-trip through YAML" || fail "YAML rendering"
+  [[ $ok -eq 1 ]] && pass "23 hostile passwords (incl. non-BMP, four that look like template tokens, DEL, a C1 control, U+2028, U+FFFE and U+FFFF) and a hostile key round-trip through YAML" || fail "YAML rendering"
   # 7a. time zone: the rendered seed installs the receiver byte for byte, its
   #     unit and the udev rule that starts it, and the port name is the same
   #     in the launcher, the receiver and the rule

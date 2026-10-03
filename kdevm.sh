@@ -71,7 +71,7 @@ SSH_OPTS=(-p "$SSH_PORT" -o UserKnownHostsFile="$KNOWN_HOSTS" -o StrictHostKeyCh
 source "$REPO/guest/factory.zsh"
 trap kdevm_factory_cleanup EXIT   # script scope; a no-op unless a build started
 
-QEMU_PATTERN="*${QEMU}*file=${WORK}*"
+QEMU_PATTERN="*${(b)QEMU}*file=${(b)WORK}*"   # (b): the paths are literal text, whatever characters they contain
 # qemu_state -> running | unknown | absent (see pid_state in the library).
 # A stale record is discarded by down and replaced by up, never by a query;
 # an unknown one is KEPT so a later command cannot mistake "could not

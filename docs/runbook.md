@@ -543,8 +543,37 @@ on two findings and each found things the other passed.
 - `ln` puts the link INSIDE the target if the target is a directory; the
   launcher refuses to link when anything at all is at the record's path.
 
+## 0.2.0 review, closure pass three (Codex and Opus, commit 0c402b5)
+
+Codex: nineteen of twenty-two, three findings it tiered blocker, all
+reasoned (its sandbox refused `mktemp`, so no probes). Opus: twenty of
+twenty-two, two nits, no regressions. Before this pass Charles put contrived
+scenarios out of scope unless they cost data or signal a foreign process.
+
+| finding | disposition |
+|---|---|
+| Codex: `F_PAT` (and `QEMU_PATTERN`) used the state path as a pattern, so a directory named `state[1]` hid a live QEMU from its own record | fixed: `${(b)...}` quotes the paths (check 4m) |
+| Codex: the factory's failure cleanup moved the disk and removed the vars copy even when the provisioning VM could not be confirmed stopped | fixed: only the seed (plaintext password) is always removed |
+| Codex: a launcher frozen past its caller's five seconds could register after a later `destroy` had removed the empty record and checked the disk | mostly declined. It needs a freeze of more than five seconds, a `destroy`, and a wake-up in the microseconds between the lock check and the `rm`, and what is lost is an overlay the user was destroying. A launcher now gives up after four seconds on its own; closing the last instant would take a generation scheme for records, which is more launcher than this project wants |
+| Opus: the factory build's `pgrep` guard is a command-line test (0.1.0 code): a pager naming the overlay makes `rebuild` fail after it has removed the overlay | declined: fails closed, loses nothing that `rebuild` was not removing; noted |
+| Opus: U+FFFE and U+FFFF in a password break the seed | fixed (two more passwords in check 7) |
+| Codex: the runbook did not say "stop before updating" | added to the rules below |
+
+- **zsh, inside an EXIT trap:** `x=$(failing-command)` had status 0 in
+  kdevm's cleanup, although the same line gives non-zero in the main flow
+  and in every small reproduction tried. `pid_state` read "No such process"
+  as "exists", then found nothing to inspect, and said UNKNOWN: a failed
+  factory build logged "could not be verified" about a QEMU that had exited
+  five seconds earlier. Existence is now decided from `kill`'s output
+  (`command kill -0 pid && echo marker`), which does not depend on a status.
+- A zombie (exited, not yet reaped) answers `kill -0` and shows `Z` in
+  `ps -o stat=`; `pid_state` calls it absent.
+
 ## Rules that are easy to forget
 
+- Stop the VM (`down`) with the version that started it BEFORE updating the
+  checkout. Updating under a running VM leaves it unrecognised; the scripts
+  then refuse to touch its disk and it has to be powered off from inside.
 - Never let the guest sleep: on this machine type it cannot be woken. Sleep
   is disabled in `/etc/systemd/sleep.conf.d/kdevm.conf`; keep it that way.
 

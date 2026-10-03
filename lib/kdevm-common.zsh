@@ -38,7 +38,8 @@ read_pidfile() {
 }
 # pid_state PID START PATTERN -> running | unknown | absent
 #   running: alive, command matches the zsh glob PATTERN, started at START
-#   absent:  no such process, or a successfully inspected process that is a
+#   absent:  no such process (or one that has exited and is only waiting to
+#            be reaped), or a successfully inspected process that is a
 #            different identity (other command, or same command but another
 #            start time), or a record with no start time (an unverifiable
 #            record is never treated as ours)
@@ -48,9 +49,17 @@ read_pidfile() {
 pid_state() {
   local pid=$1 start=$2 pat=$3 cmd err live
   [[ "$pid" =~ ^[1-9][0-9]*$ && -n "$start" ]] || { echo absent; return 0; }
-  if ! err=$(kill -0 "$pid" 2>&1); then
+  # Does the pid exist? Read from kill's own words, not from an exit status:
+  # inside kdevm's EXIT trap zsh gave status 0 to a command substitution
+  # whose command had failed (seen 2026-10-03 in the factory's cleanup),
+  # which turned "No such process" into "alive" and then into "unknown".
+  err=$(command kill -0 "$pid" 2>&1 && echo kdevm-alive) || true
+  if [[ "$err" != *kdevm-alive ]]; then
     [[ "$err" == *ermitted* ]] && echo unknown || echo absent; return 0
   fi
+  # A zombie has exited: it holds no file and runs nothing, it only waits
+  # for a parent that is busy (kdevm itself, inside its EXIT trap) to reap it.
+  [[ "$(ps -o stat= -p "$pid" 2>/dev/null)" == *Z* ]] && { echo absent; return 0; }
   cmd=$(proc_cmd "$pid") || { echo unknown; return 0; }
   [[ -n "$cmd" ]] || { echo unknown; return 0; }
   [[ "$cmd" == ${~pat} ]] || { echo absent; return 0; }
@@ -79,6 +88,10 @@ pid_state() {
 # and launch_tracked returns 1 without starting anything if it is still
 # there. The launcher's stdout and stderr, and COMMAND's, are appended to LOG.
 #
+# A launcher also gives up by itself once it is four seconds old (callers
+# wait five): one that was merely slow does not register after its caller
+# has reported failure.
+#
 # An EMPTY record is a cancelled launch: a caller that gives up waiting for
 # a launcher creates one (cancel_launch), which makes that launcher's link
 # fail. Because launchers never write into an existing file, an empty record
@@ -90,7 +103,7 @@ launch_tracked() { # record, log, command...
              [[ -n "$lockfd" ]] && exec {lockfd}>&-
              tmp="$rec.launch.$$"
              source "$lib" && start=$(proc_start $$) && [[ -n "$start" ]] && print -r -- "$$ $start" > "$tmp" \
-               && [[ ! -e "$rec" && ! -L "$rec" ]] && ln "$tmp" "$rec" 2>/dev/null && rm -f "$tmp" && exec "$@"
+               && (( SECONDS < 4 )) && [[ ! -e "$rec" && ! -L "$rec" ]] && ln "$tmp" "$rec" 2>/dev/null && rm -f "$tmp" && exec "$@"
              rm -f "$tmp"
              print -u2 -r -- "kdevm: could not record this process and its start time in $rec; not started: $1"; exit 1' \
     kdevm-launch "$KDEVM_LIB" "$rec" "${KDEVM_LOCK_FD:-}" "$@" </dev/null >>"$logf" 2>&1 &
