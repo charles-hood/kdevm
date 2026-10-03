@@ -31,6 +31,7 @@ for f in kdevm.sh guest/build.sh runtime/build.sh lib/kdevm-common.zsh tests/che
   zsh -n "$f" && pass "zsh -n $f" || fail "zsh -n $f"
 done
 python3 -c 'compile(open("guest/vendor/omarchy-native-clipboard-bridge").read(), "agent", "exec")' 2>/dev/null && pass "vendored clipboard agent compiles (in memory, no bytecode written)" || fail "vendored clipboard agent compiles"
+python3 -c 'compile(open("guest/vendor/omarchy-native-battery-bridge").read(), "agent", "exec")' 2>/dev/null && pass "vendored battery agent compiles (in memory, no bytecode written)" || fail "vendored battery agent compiles"
 python3 -c 'import json; json.load(open("guest/files/firefox-policies.json"))' && pass "firefox policies.json parses" || fail "firefox policies.json parses"
 # 0a. time zone receiver: only the plain name of a zone file the guest has gets
 #     through; everything else a host could send is rejected (run in memory
@@ -233,12 +234,10 @@ wait $LH2 2>/dev/null
 # 7. YAML rendering (finding 7): hostile passwords and keys survive the template
 if [[ -x .venv/bin/python ]] && .venv/bin/python -c 'import yaml' 2>/dev/null; then
   awk "/<<'PY'\$/{f=1; next} f && /^PY\$/{exit} f" guest/factory.zsh > "$T/render.py"
-  V=guest/vendor; ok=1
+  ok=1
   for pw in '&secret' '|secret' 'abc #secret' '12345678' 'q"uo\te' "it's" '{a: b}' '- dash' 'tab	here' ' leading space' 'üñî©ødé' '\\backslash' 'a\nb' 'pass🔑word'; do
     KDEVM_USER_NAME=tester KDEVM_PASS="$pw" KDEVM_SSHKEY='ssh-ed25519 AAAATEST comment #with: odd & chars' \
-      python3 "$T/render.py" guest/user-data.yaml.tmpl "$T/ud.yaml" "$V/omarchy-native-clipboard-bridge" \
-      "$V/omarchy-native-clipboard-bridge.service" "$V/92-omarchy-native-clipboard.rules" \
-      "$V/90-try-omarchy-quantum.conf" guest/files/firefox-policies.json guest/files/kdevm-timezone || { ok=0; continue; }
+      python3 "$T/render.py" guest/user-data.yaml.tmpl "$T/ud.yaml" guest || { ok=0; continue; }
     KDEVM_PASS="$pw" .venv/bin/python -c 'import yaml,os,sys; d=yaml.safe_load(open(sys.argv[1])); u=d["users"][0]; sys.exit(0 if u["plain_text_passwd"]==os.environ["KDEVM_PASS"] and u["ssh_authorized_keys"][0]=="ssh-ed25519 AAAATEST comment #with: odd & chars" else 1)' "$T/ud.yaml" || { ok=0; echo "      password case failed: ${(q)pw}"; }
   done
   [[ $ok -eq 1 ]] && pass "14 hostile passwords (incl. non-BMP) and a hostile key round-trip through YAML" || fail "YAML rendering"
@@ -259,6 +258,29 @@ PYT
 else
   echo "SKIP  YAML rendering (no .venv with PyYAML; see header)"
 fi
+  # 7b. battery: every vendored file reaches the seed byte for byte at the
+  #     path the guest expects, the DKMS version in the path is the one in
+  #     dkms.conf, and the port name is the same in launcher, agent and rule
+  .venv/bin/python - "$T/ud.yaml" <<'PYB' && pass "battery: agent, unit, rules and module sources rendered byte for byte; DKMS version and port name consistent" || fail "battery pieces in the rendered user-data"
+import base64, re, sys, yaml
+seed = yaml.safe_load(open(sys.argv[1])); files = {f["path"]: f for f in seed["write_files"]}
+V = "guest/vendor/"; version = re.search(r'PACKAGE_VERSION="([^"]+)"', open(V + "try-omarchy-battery/dkms.conf").read()).group(1)
+src = f"/usr/src/try-omarchy-battery-{version}/"
+for path, vendored in {
+    src + "try-omarchy-battery.c": "try-omarchy-battery/try-omarchy-battery.c", src + "Makefile": "try-omarchy-battery/Makefile",
+    src + "dkms.conf": "try-omarchy-battery/dkms.conf", "/etc/modules-load.d/95-try-omarchy-battery.conf": "95-try-omarchy-battery.conf",
+    "/usr/local/bin/omarchy-native-battery-bridge": "omarchy-native-battery-bridge",
+    "/etc/systemd/system/omarchy-native-battery-bridge.service": "omarchy-native-battery-bridge.service",
+    "/etc/udev/rules.d/95-omarchy-native-battery.rules": "95-omarchy-native-battery.rules",
+}.items():
+    assert base64.b64decode(files[path]["content"]) == open(V + vendored, "rb").read(), path
+assert files["/usr/local/bin/omarchy-native-battery-bridge"]["permissions"] == "0755"
+run = [" ".join(c) if isinstance(c, list) else c for c in seed["runcmd"]]
+assert any(f"dkms install try-omarchy-battery/{version} " in c for c in run) and "systemctl enable omarchy-native-battery-bridge.service" in run
+assert {"dkms", "linux-headers-arm64", "powerdevil"} <= set(seed["packages"])
+port = "dev.tryomarchy.battery"
+assert f"name={port}" in open("kdevm.sh").read() and port in open(V + "omarchy-native-battery-bridge").read() and port in open(V + "95-omarchy-native-battery.rules").read()
+PYB
 
 # 8. config loader: any NAME=value is read, an explicit (even empty) variable wins
 mkdir -p "$T/home/.config/kdevm"; printf 'QEMU_IMG=/custom/qemu-img\nKDEVM_USER=fromfile\nKDEVM_MEM_MB=1234\n' > "$T/home/.config/kdevm/env"
@@ -456,25 +478,25 @@ EOF
   # 13a. default (mirror): the port is on the command line and both helpers run on their own sockets
   out=$(k13 up); rc=$?; FQ13=$(cut -d' ' -f1 "$T/v13/qemu.pid" 2>/dev/null); sleep 1.5
   argv=$(cat "$T/v13/fakeqemu.argv" 2>/dev/null)
-  if [[ $rc -eq 0 && "$argv" == *"socket,id=tz,path=$T/v13/run/timezone.sock,server=on,wait=off"* && "$argv" == *"chardev=tz,name=dev.tryomarchy.timezone"* && "$(logged13 clipboard)" == 1 && "$(logged13 timezone)" == 1 ]]; then pass "up (mirror): time zone port on the QEMU command line, clipboard and time zone helpers started on their sockets"; else fail "up with time zone mirroring (rc=$rc: $(echo "$out" | tail -2 | tr '\n' ' ') log: $(tr '\n' ';' < "$T/v13/helpers.log" 2>/dev/null))"; fi
+  if [[ $rc -eq 0 && "$argv" == *"socket,id=tz,path=$T/v13/run/timezone.sock,server=on,wait=off"* && "$argv" == *"chardev=tz,name=dev.tryomarchy.timezone"* && "$argv" == *"socket,id=bat,path=$T/v13/run/battery.sock,server=on,wait=off"* && "$argv" == *"chardev=bat,name=dev.tryomarchy.battery"* && "$(logged13 clipboard)" == 1 && "$(logged13 timezone)" == 1 && "$(logged13 battery)" == 1 ]]; then pass "up: time zone and battery ports on the QEMU command line; clipboard, time zone and battery helpers started on their sockets"; else fail "up with time zone mirroring (rc=$rc: $(echo "$out" | tail -2 | tr '\n' ' ') log: $(tr '\n' ';' < "$T/v13/helpers.log" 2>/dev/null))"; fi
   out=$(k13 status)
-  [[ "$out" =~ '-- bridges: supervisor pid [0-9]+, clipboard helper [0-9]+, time zone helper [0-9]+' ]] && pass "status: one supervisor, both helpers reported by pid" || fail "status bridges line: $(echo "$out" | grep bridges)"
+  [[ "$out" =~ '-- bridges: supervisor pid [0-9]+, clipboard helper [0-9]+, battery helper [0-9]+, time zone helper [0-9]+' ]] && pass "status: one supervisor, all three helpers reported by pid" || fail "status bridges line: $(echo "$out" | grep bridges)"
   # 13b. a helper that dies is started again; the other one is left alone
   tzp=$(pgrep -f -- "--bridge-native-timezone $FQ13 $T/v13/run/timezone.sock"); kill $tzp 2>/dev/null; sleep 2.5
   tzp2=$(pgrep -f -- "--bridge-native-timezone $FQ13 $T/v13/run/timezone.sock")
-  [[ -n "$tzp" && -n "$tzp2" && "$tzp2" != "$tzp" && "$(logged13 timezone)" == 2 && "$(logged13 clipboard)" == 1 ]] && pass "supervisor: a dead time zone helper is restarted, the clipboard helper is not disturbed" || fail "helper restart (was '$tzp' now '$tzp2', log: $(tr '\n' ';' < "$T/v13/helpers.log"))"
+  [[ -n "$tzp" && -n "$tzp2" && "$tzp2" != "$tzp" && "$(logged13 timezone)" == 2 && "$(logged13 clipboard)" == 1 && "$(logged13 battery)" == 1 ]] && pass "supervisor: a dead time zone helper is restarted, the other helpers are not disturbed" || fail "helper restart (was '$tzp' now '$tzp2', log: $(tr '\n' ';' < "$T/v13/helpers.log"))"
   # 13c. down (ssh stubbed out, so QMP): QEMU, supervisor and helpers gone, records and sockets removed
   SV13=$(cut -d' ' -f1 "$T/v13/bridges.pid" 2>/dev/null)
   out=$(k13 down); rc=$?; sleep 0.5
-  if [[ $rc -eq 0 && -n "$SV13" && -z "$(helpers13)" && ! -e "$T/v13/qemu.pid" && ! -e "$T/v13/bridges.pid" && ! -e "$T/v13/run/timezone.sock" && ! -e "$T/v13/run/clipboard.sock" ]] && ! kill -0 "$FQ13" 2>/dev/null && ! kill -0 "$SV13" 2>/dev/null; then pass "down: QEMU, supervisor and both helpers gone; pid records and sockets removed"; else fail "down after bridges (rc=$rc helpers='$(helpers13)': $(echo "$out" | tail -2 | tr '\n' ' '))"; fi
+  if [[ $rc -eq 0 && -n "$SV13" && -z "$(helpers13)" && ! -e "$T/v13/qemu.pid" && ! -e "$T/v13/bridges.pid" && ! -e "$T/v13/run/timezone.sock" && ! -e "$T/v13/run/clipboard.sock" && ! -e "$T/v13/run/battery.sock" ]] && ! kill -0 "$FQ13" 2>/dev/null && ! kill -0 "$SV13" 2>/dev/null; then pass "down: QEMU, supervisor and all helpers gone; pid records and sockets removed"; else fail "down after bridges (rc=$rc helpers='$(helpers13)': $(echo "$out" | tail -2 | tr '\n' ' '))"; fi
   # 13d. KDEVM_TIMEZONE=off: no port, no time zone helper, status says so
   : > "$T/v13/helpers.log"
   out=$(KDEVM_TIMEZONE=off k13 up); rc=$?; FQ13=$(cut -d' ' -f1 "$T/v13/qemu.pid" 2>/dev/null); sleep 1.5
   argv=$(cat "$T/v13/fakeqemu.argv" 2>/dev/null); st=$(KDEVM_TIMEZONE=off k13 status)
-  if [[ $rc -eq 0 && "$argv" != *timezone* && "$(logged13 clipboard)" == 1 && "$(grep -c timezone "$T/v13/helpers.log")" == 0 && ! -e "$T/v13/run/timezone.sock" && "$st" == *"time zone mirroring off"* ]]; then pass "KDEVM_TIMEZONE=off: no port, no time zone helper, status says mirroring off"; else fail "KDEVM_TIMEZONE=off (rc=$rc argv has timezone: $([[ "$argv" == *timezone* ]] && echo yes || echo no), log: $(tr '\n' ';' < "$T/v13/helpers.log"))"; fi
+  if [[ $rc -eq 0 && "$argv" != *timezone* && "$(logged13 clipboard)" == 1 && "$(logged13 battery)" == 1 && "$(grep -c timezone "$T/v13/helpers.log")" == 0 && ! -e "$T/v13/run/timezone.sock" && "$st" == *"time zone mirroring off"* ]]; then pass "KDEVM_TIMEZONE=off: no port, no time zone helper, status says mirroring off"; else fail "KDEVM_TIMEZONE=off (rc=$rc argv has timezone: $([[ "$argv" == *timezone* ]] && echo yes || echo no), log: $(tr '\n' ';' < "$T/v13/helpers.log"))"; fi
   # 13e. SIGTERM to the supervisor while QEMU lives stops its helpers (they are not orphaned)
   SV13=$(cut -d' ' -f1 "$T/v13/bridges.pid" 2>/dev/null); kill "$SV13" 2>/dev/null; sleep 2
-  if [[ -n "$SV13" && -z "$(helpers13)" ]] && ! kill -0 "$SV13" 2>/dev/null && kill -0 "$FQ13" 2>/dev/null; then pass "supervisor SIGTERM: its helper stopped with it, QEMU untouched"; else fail "supervisor SIGTERM (helpers='$(helpers13)')"; fi
+  if [[ -n "$SV13" && -z "$(helpers13)" ]] && ! kill -0 "$SV13" 2>/dev/null && kill -0 "$FQ13" 2>/dev/null; then pass "supervisor SIGTERM: its helpers stopped with it, QEMU untouched"; else fail "supervisor SIGTERM (helpers='$(helpers13)')"; fi
   out=$(k13 down); rc=$?
   [[ $rc -eq 0 ]] && ! kill -0 "$FQ13" 2>/dev/null && pass "down with the supervisor already gone: clean exit" || fail "down after supervisor exit (rc=$rc)"
   # 13f. any other value is refused before anything starts

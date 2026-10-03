@@ -3,8 +3,8 @@
 # Google Chrome (native arm64) + Firefox ESR, PipeWire, sddm auto-login, the
 # try-omarchy clipboard agent, the time zone receiver, a 9p mount for the
 # shared Mac folder.
-# Rendered by guest/build.sh: the double-at tokens are replaced, vendored
-# files are inlined base64. Derived from the author's xrdp container recipe
+# Rendered by guest/factory.zsh: the double-at tokens are replaced, and a
+# B64 token inlines the named file under guest/, base64. Derived from the author's xrdp container recipe
 # for the same desktop, minus everything xrdp.
 
 hostname: kdevm
@@ -82,6 +82,12 @@ packages:
   - pulseaudio-utils
   # browsers (Chrome comes from Google's .deb in runcmd)
   - firefox-esr
+  # battery: the module is built by DKMS against the installed kernel's
+  # headers (the metapackage keeps them in step with kernel upgrades);
+  # powerdevil is Plasma's battery applet and reads UPower
+  - dkms
+  - linux-headers-arm64
+  - powerdevil
   # clipboard agent needs wl-paste/wl-copy; preflight needs eglinfo and kmscube
   - wl-clipboard
   - mesa-utils
@@ -208,26 +214,26 @@ write_files:
   - path: /usr/local/bin/omarchy-native-clipboard-bridge
     permissions: "0755"
     encoding: b64
-    content: @@B64_CLIPBOARD_AGENT@@
+    content: @@B64:vendor/omarchy-native-clipboard-bridge@@
   - path: /etc/systemd/user/omarchy-native-clipboard-bridge.service
     permissions: "0644"
     encoding: b64
-    content: @@B64_CLIPBOARD_UNIT@@
+    content: @@B64:vendor/omarchy-native-clipboard-bridge.service@@
   - path: /etc/udev/rules.d/92-omarchy-native-clipboard.rules
     permissions: "0644"
     encoding: b64
-    content: @@B64_CLIPBOARD_UDEV@@
+    content: @@B64:vendor/92-omarchy-native-clipboard.rules@@
   - path: /etc/pipewire/pipewire.conf.d/90-try-omarchy-quantum.conf
     permissions: "0644"
     encoding: b64
-    content: @@B64_PIPEWIRE_QUANTUM@@
+    content: @@B64:vendor/90-try-omarchy-quantum.conf@@
   # ---- time zone: follow the Mac (guest/files/kdevm-timezone) ---------------
   #      No enable step: udev starts the service when the host attached the
   #      port (KDEVM_TIMEZONE=mirror), and never when it did not.
   - path: /usr/local/sbin/kdevm-timezone
     permissions: "0755"
     encoding: b64
-    content: @@B64_TIMEZONE_AGENT@@
+    content: @@B64:files/kdevm-timezone@@
   - path: /etc/systemd/system/kdevm-timezone.service
     permissions: "0644"
     content: |
@@ -242,11 +248,76 @@ write_files:
     permissions: "0644"
     content: |
       SUBSYSTEM=="virtio-ports", ATTR{name}=="dev.tryomarchy.timezone", TAG+="systemd", ENV{SYSTEMD_WANTS}+="kdevm-timezone.service"
+  # ---- battery: the Mac's battery as BAT0/ADP0, try-omarchy's guest side
+  #      verbatim (guest/vendor/). A kernel module presents the power_supply
+  #      devices; the agent feeds it from the host bridge's virtio port.
+  - path: /usr/src/try-omarchy-battery-1.2.0/try-omarchy-battery.c
+    permissions: "0644"
+    encoding: b64
+    content: @@B64:vendor/try-omarchy-battery/try-omarchy-battery.c@@
+  - path: /usr/src/try-omarchy-battery-1.2.0/Makefile
+    permissions: "0644"
+    encoding: b64
+    content: @@B64:vendor/try-omarchy-battery/Makefile@@
+  - path: /usr/src/try-omarchy-battery-1.2.0/dkms.conf
+    permissions: "0644"
+    encoding: b64
+    content: @@B64:vendor/try-omarchy-battery/dkms.conf@@
+  - path: /etc/modules-load.d/95-try-omarchy-battery.conf
+    permissions: "0644"
+    encoding: b64
+    content: @@B64:vendor/95-try-omarchy-battery.conf@@
+  - path: /usr/local/bin/omarchy-native-battery-bridge
+    permissions: "0755"
+    encoding: b64
+    content: @@B64:vendor/omarchy-native-battery-bridge@@
+  - path: /etc/systemd/system/omarchy-native-battery-bridge.service
+    permissions: "0644"
+    encoding: b64
+    content: @@B64:vendor/omarchy-native-battery-bridge.service@@
+  - path: /etc/udev/rules.d/95-omarchy-native-battery.rules
+    permissions: "0644"
+    encoding: b64
+    content: @@B64:vendor/95-omarchy-native-battery.rules@@
+  # ---- no sleep: a suspended guest cannot be woken on this machine type (QMP
+  #      system_wakeup: "not supported by this guest"; keys do nothing; QEMU
+  #      still reports "running"), so the only way out is to kill the VM.
+  #      Remove the capability: logind then answers CanSuspend=no, Plasma
+  #      offers no Sleep, and no power policy can reach it.
+  - path: /etc/systemd/sleep.conf.d/kdevm.conf
+    permissions: "0644"
+    content: |
+      [Sleep]
+      AllowSuspend=no
+      AllowHibernation=no
+      AllowSuspendThenHibernate=no
+      AllowHybridSleep=no
+  # ---- powerdevil is installed for its battery applet only. The battery is
+  #      the Mac's, and so is every decision about it: nothing happens at a
+  #      critical level, and the screen is not dimmed or turned off on idle
+  #      (it never was before powerdevil was here).
+  - path: /etc/xdg/powerdevilrc
+    permissions: "0644"
+    content: |
+      [BatteryManagement]
+      BatteryCriticalAction=0
+
+      [AC][Display]
+      DimDisplayWhenIdle=false
+      TurnOffDisplayWhenIdle=false
+
+      [Battery][Display]
+      DimDisplayWhenIdle=false
+      TurnOffDisplayWhenIdle=false
+
+      [LowBattery][Display]
+      DimDisplayWhenIdle=false
+      TurnOffDisplayWhenIdle=false
   # ---- Firefox: same policy file as the container ---------------------------
   - path: /usr/lib/firefox-esr/distribution/policies.json
     permissions: "0644"
     encoding: b64
-    content: @@B64_FIREFOX_POLICIES@@
+    content: @@B64:files/firefox-policies.json@@
   # ---- Chrome: same four managed keys as the container and dell-kde ----------
   - path: /etc/opt/chrome/policies/managed/kdevm.json
     permissions: "0644"
@@ -310,8 +381,13 @@ runcmd:
     sed -i 's|<default>preferred://browser,|<default>firefox-esr.desktop,google-chrome.desktop,|' "$ko" || true
   - apt-get purge -y plasma-welcome || true
   - apt-get autoremove -y || true
-  # services: Mac share mount, clipboard agent for every graphical session, graphical boot
+  # Battery module: build and install for the NEWEST installed kernel (the
+  # one the factory boots next), not the one cloud-init happens to run on.
+  # The factory's capability checks fail the build if it is missing.
+  - [ sh, -c, "dkms install try-omarchy-battery/1.2.0 -k \"$(ls -1 /lib/modules | sort -V | tail -1)\"" ]
+  # services: Mac share mount, clipboard agent for every graphical session, battery agent, graphical boot
   - systemctl daemon-reload
+  - systemctl enable omarchy-native-battery-bridge.service
   - systemctl enable kdevm-hints.service
   - systemctl enable home-@@USER@@-Mac.mount
   - systemctl --global enable omarchy-native-clipboard-bridge.service

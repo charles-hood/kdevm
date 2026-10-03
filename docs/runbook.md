@@ -364,7 +364,73 @@ menu titles.
   `-display cocoa` segfaults in the patched Cocoa code and puts a macOS
   crash dialog on screen.
 
+## Battery mirroring (2026-10-03)
+
+The Mac's battery inside the guest as a real power supply. The host is a
+laptop (`Mac16,8`), so the plan's condition for this item holds.
+
+How it is wired, all of the guest side being try-omarchy's files verbatim
+(`guest/vendor/`):
+
+- Host: a third virtio port (`nr=7,name=dev.tryomarchy.battery`) and
+  `omarchy-vm-helper --bridge-native-battery` under the same supervisor. It
+  sends a whole JSON snapshot on every IOKit power change and every 30 s.
+- Guest: `try_omarchy_battery`, a 451-line kernel module (GPL-2.0-only)
+  built by DKMS in the factory, registers `BAT0` and `ADP0` and takes one
+  snapshot per write on a root-only sysfs attribute. Their Python agent
+  reads the port and writes that attribute. UPower and Plasma's battery
+  applet (`powerdevil`) need nothing else.
+- No simpler design exists here: the state changes all the time, so a
+  boot-time hint would be worthless.
+
+Measured on a factory built from this commit (throwaway state directory,
+second VM):
+
+| | |
+|---|---|
+| DKMS build of the module, Debian kernel 6.12.111 | 7 s; loads at boot through `modules-load.d` |
+| agent started | 2.1 s after kernel start |
+| guest reading against `pmset -g batt` | 80%, not charging, AC online, 56 cycles on both sides |
+| Plasma | the battery icon is in the tray while discharging (a 42% discharging state written to the module by hand); hidden behind the arrow on AC and not charging, as on any laptop |
+| factory | 102 to 111 s (was 93 to 101), 4.3 GB on disk (was 4.0), `dkms` + headers + compiler about 300 MB |
+
+What it turned up:
+
+- **A suspended guest is a dead guest.** Sleep is suspend-to-idle here
+  (`/sys/power/mem_sleep` is `[s2idle]`). After `powerdevil` suspended the
+  test guest (an idle policy set on purpose), QEMU still reported
+  `running`, `system_wakeup` answered "wake-up from suspend is not supported
+  by this guest", an injected key did nothing, ssh timed out, and `down` had
+  to kill it. Plasma's own Sleep button could already do this in 0.1.0.
+  Sleep is now disabled where it is decided:
+  `/etc/systemd/sleep.conf.d/kdevm.conf`. logind answers `CanSuspend=no`,
+  `systemctl suspend` fails with "Sleep verb 'suspend' is disabled by
+  config", and a user-level policy asking for sleep after 60 s idle left the
+  guest running 197 s later.
+- Do not restart `systemd-logind` in a running guest to pick up a config
+  change: it takes the graphical session down with it.
+- `powerdevil` is installed for the applet only. `/etc/xdg/powerdevilrc`
+  sets no action at a critical battery level and no dimming or screen-off on
+  idle, in all three profiles; the key names were read out of
+  `libpowerdevilcore` (UTF-16 strings), since the package ships no schema
+  file. That `/etc/xdg` is honoured was shown by the sleep test above.
+- `powerdevil` logs "Charge thresholds are not supported by the kernel for
+  this hardware" and a failed brightness helper at start. Both are true and
+  harmless: there is no backlight and the charge limit is read-only.
+- DKMS signs the module with a self-signed key it generates in the factory,
+  and the kernel logs that an out-of-tree module taints it. Expected: the
+  guest does not use Secure Boot.
+- The module is built for the newest installed kernel, not the one
+  cloud-init happens to run on (`dkms install -k`), and the factory's
+  capability checks fail the build if it is missing for that kernel.
+- The first test of the path used a port hot-plugged over QMP
+  (`chardev-add`, then `device_add virtserialport`), which works on the
+  running bus and is a quick way to try the next bridge.
+
 ## Rules that are easy to forget
+
+- Never let the guest sleep: on this machine type it cannot be woken. Sleep
+  is disabled in `/etc/systemd/sleep.conf.d/kdevm.conf`; keep it that way.
 
 - `gic-version=3` is mandatory under HVF on this QEMU; it rejects GICv2.
 - Never attach the Homebrew `edk2-arm-vars.fd` writable. Every kdevm boot

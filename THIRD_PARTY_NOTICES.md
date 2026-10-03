@@ -7,7 +7,7 @@ under `guest/vendor/` (MIT, see there).
 
 | component | what kdevm uses | license | where it comes from |
 |---|---|---|---|
-| [try-omarchy](https://github.com/omacom/try-omarchy) | the QEMU/VirGL/libslirp build script and its 23 patches, the Swift helper (`omarchy-vm-helper`, clipboard and time zone bridges), four guest files vendored verbatim | MIT | cloned at the commit in `runtime/pin.txt`; vendored files carry their upstream path in `guest/vendor/README.md` |
+| [try-omarchy](https://github.com/omacom/try-omarchy) | the QEMU/VirGL/libslirp build script and its 23 patches, the Swift helper (`omarchy-vm-helper`, clipboard, time zone and battery bridges), guest files vendored verbatim | MIT, except the battery kernel module in `guest/vendor/try-omarchy-battery/`, which is GPL-2.0-only (licence text beside it) | cloned at the commit in `runtime/pin.txt`; vendored files carry their upstream path in `guest/vendor/README.md` |
 | [QEMU](https://www.qemu.org/) | `qemu-system-aarch64` 11.1.1 built from source by try-omarchy's script, staged as `bin/kdevm`, run under HVF | GPL-2.0-only (with LGPL and BSD parts) | gitlab.com/qemu-project, commit pinned in try-omarchy's script |
 | [virglrenderer](https://gitlab.freedesktop.org/virgl/virglrenderer) | the host-side OpenGL replay, built from source with the startergo patch set | MIT | pinned by try-omarchy's script |
 | [libslirp](https://gitlab.freedesktop.org/slirp/libslirp) | user-mode networking | BSD-3-Clause | pinned by try-omarchy's script |
@@ -21,7 +21,8 @@ under `guest/vendor/` (MIT, see there).
 
 The patch set is described in `docs/patches.md`. kdevm modifies exactly one
 patch at build time, `qemu-cocoa-product-identity.patch`, replacing the
-product name string; the modified patch is regenerated from the pinned
+product name string (and the same string on one line of the helper's
+source, the name of the process its bridges accept); the modified patch is regenerated from the pinned
 upstream file on every build and is not stored here.
 
 The QEMU binary kdevm builds is GPL-2.0 software. This repository does not

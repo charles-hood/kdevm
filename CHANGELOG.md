@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+- Battery mirroring: the Mac's battery appears in the guest as a real
+  `BAT0`/`ADP0` (charge, state, time estimates, cycle count), so UPower and
+  Plasma's battery applet read it like any laptop's. try-omarchy's helper
+  (`--bridge-native-battery`) sends snapshots on a third virtio port; their
+  guest side is vendored verbatim: an agent and a small kernel module that
+  DKMS builds in the factory (GPL-2.0-only; the rest of the repository stays
+  MIT). The factory gains `dkms`, the kernel headers, a compiler and
+  `powerdevil` (about 300 MB) and a thirteenth capability check. A Mac
+  without a battery shows as mains only. Needs `kdevm.sh rebuild`.
+- Sleep is disabled in the guest (`/etc/systemd/sleep.conf.d`). A suspended
+  guest cannot be woken on this machine type: QEMU reports it as running,
+  `system_wakeup` is refused and keys do nothing, so it had to be killed.
+  That was already reachable from Plasma's Sleep button; with a power
+  manager installed it would also have been reachable from an idle timer.
+  The battery is shown, never acted on: no action at a critical level, no
+  dimming or screen-off on idle.
+- The template inlines files with one generic token
+  (`@@B64:<path under guest/>@@`); the renderer no longer takes a list of
+  files. Two more offline checks (65 in all).
+
 - Dock name: the running VM is labelled "kdevm" in the Dock, Force Quit and
   crash reports, not "qemu-system-aarch64". The runtime stages QEMU as
   `bin/kdevm`, which is how try-omarchy's app build gets its own name there,

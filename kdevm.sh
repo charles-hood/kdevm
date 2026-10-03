@@ -2,7 +2,7 @@
 # kdevm: the Debian 13 + KDE Plasma desktop as a GPU-accelerated QEMU VM on
 # this Mac, in a native window. Runtime: try-omarchy's patched QEMU (HVF,
 # Cocoa + VirGL, SLIRP, SDL duplex audio, virtio-9p) and its Swift helper for
-# the clipboard and time zone bridges. Guest: our own Debian factory
+# the clipboard, time zone and battery bridges. Guest: our own Debian factory
 # (guest/build.sh).
 #
 #   kdevm.sh runtime     build/stage the QEMU runtime + helper
@@ -53,6 +53,8 @@ RUN="$STATE/run"                 # mode 0700: the helper refuses sockets in a sh
 QMP="$RUN/qmp.sock"
 CLIP="$RUN/clipboard.sock"
 TZSOCK="$RUN/timezone.sock"
+BATSOCK="$RUN/battery.sock"
+SOCKETS=("$QMP" "$CLIP" "$TZSOCK" "$BATSOCK")
 SERIAL="$STATE/serial.log"
 PIDFILE="$STATE/qemu.pid"
 BRIDGEPID="$STATE/bridges.pid"       # the one supervisor of every host bridge
@@ -197,7 +199,7 @@ up() {
   # about (pid file lost, identity check failed) must not be started beside.
   local stray; stray=$(pgrep -f -- "file=$WORK" | head -1 || true)
   [[ -n "$stray" ]] && die "a QEMU already runs on $WORK (pid $stray) but is not tracked; stop it (kdevm.sh ssh 'sudo poweroff', or kill $stray) before up"
-  rm -f "$QMP" "$CLIP" "$TZSOCK"
+  rm -f "${SOCKETS[@]}"
   install_icon || log "warning: could not build the Dock icon from ${KDEVM_ICON:-$REPO/assets/kdevm-icon.png}; the Dock icon is unchanged"
   # The helper's bridges accept only a socket owned by this uid with no
   # group/other bits (NativeBridgeSocket.swift); the script-wide umask 077
@@ -207,8 +209,11 @@ up() {
   # Time zone: a second virtio port the helper writes the Mac's zone to every
   # five seconds; the guest's kdevm-timezone service (started by udev when
   # the port exists) applies it. Off: no port, so nothing runs on either side.
+  # Battery: a third port carrying the Mac's battery state; the guest agent
+  # feeds it to a kernel module that presents BAT0/ADP0 (a Mac without a
+  # battery shows as mains only).
   local -a bridges tzdev
-  bridges=(--bridge-native-clipboard "$CLIP")
+  bridges=(--bridge-native-clipboard "$CLIP" --bridge-native-battery "$BATSOCK")
   if [[ "$TIMEZONE" == mirror ]]; then
     bridges+=(--bridge-native-timezone "$TZSOCK")
     tzdev=(-chardev "socket,id=tz,path=$TZSOCK,server=on,wait=off"
@@ -246,6 +251,8 @@ up() {
     -chardev "socket,id=clip,path=$CLIP,server=on,wait=off" \
     -device virtserialport,bus=vser.0,nr=2,chardev=clip,name=dev.tryomarchy.clipboard \
     "${tzdev[@]}" \
+    -chardev "socket,id=bat,path=$BATSOCK,server=on,wait=off" \
+    -device virtserialport,bus=vser.0,nr=7,chardev=bat,name=dev.tryomarchy.battery \
     -fw_cfg "name=opt/kdevm/scale,string=$scale" \
     -qmp "unix:$QMP,server=on,wait=off" -serial "file:$SERIAL" -monitor none \
     >"$STATE/qemu.out" 2>&1 {KDEVM_LOCK_FD}<&- &
@@ -257,7 +264,7 @@ up() {
     kill $pid 2>/dev/null || true
     for i in {1..25}; do kill -0 $pid 2>/dev/null || break; sleep 0.2; done
     kill -0 $pid 2>/dev/null && { kill -9 $pid 2>/dev/null || true; sleep 0.5; }
-    rm -f "$QMP" "$CLIP" "$TZSOCK"
+    rm -f "${SOCKETS[@]}"
     die "could not record QEMU's start time (process inspection failed); the launched QEMU (pid $pid) was terminated"
   fi
   echo "$pid $start" > "$PIDFILE"
@@ -280,7 +287,7 @@ up() {
       for i in {1..25}; do kill -0 $pid 2>/dev/null || break; sleep 0.2; done
       kill -0 $pid 2>/dev/null && { kill -9 $pid 2>/dev/null || true; sleep 0.5; }
     fi
-    rm -f "$PIDFILE" "$QMP" "$CLIP" "$TZSOCK"
+    rm -f "$PIDFILE" "${SOCKETS[@]}"
     cat "$STATE/qemu.out" >&2
     die "QEMU failed to start (see above)"
   fi
@@ -362,7 +369,7 @@ down() {
   for i in {1..45}; do kill -0 "$pid" 2>/dev/null || break; sleep 1; done
   if kill -0 "$pid" 2>/dev/null; then log "guest did not power off in 45 s; terminating"; kill "$pid" 2>/dev/null || true; sleep 2; kill -9 "$pid" 2>/dev/null || true; fi
   local brc=0; stop_bridge || brc=$?
-  rm -f "$PIDFILE" "$QMP" "$CLIP" "$TZSOCK"
+  rm -f "$PIDFILE" "${SOCKETS[@]}"
   log "stopped (overlay kept; 'up' resumes it)"
   [[ $brc -eq 0 ]] || return 2
 }
@@ -432,7 +439,7 @@ status() {
   # running (no change), unknown (record preserved, nothing signalled),
   # absent (bridge_pid drops the stale record; nothing to report).
   case "$(bridge_state)" in
-    running) echo "-- bridges: supervisor pid $(bridge_pid), clipboard helper $(helper_pid clipboard "$CLIP"), time zone $([[ -S "$TZSOCK" ]] && echo "helper $(helper_pid timezone "$TZSOCK")" || echo "mirroring off")" ;;
+    running) echo "-- bridges: supervisor pid $(bridge_pid), clipboard helper $(helper_pid clipboard "$CLIP"), battery helper $(helper_pid battery "$BATSOCK"), time zone $([[ -S "$TZSOCK" ]] && echo "helper $(helper_pid timezone "$TZSOCK")" || echo "mirroring off")" ;;
     unknown) echo "-- bridges: UNKNOWN: supervisor pid $(head -1 "$BRIDGEPID" | cut -d' ' -f1) could not be inspected; tracking preserved, nothing signalled" ;;
     absent)  bridge_pid >/dev/null ;;
   esac

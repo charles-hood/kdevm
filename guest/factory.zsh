@@ -101,16 +101,15 @@ kdevm_factory_build() {   # [--force]
   # ---- 3. cloud-init seed ---------------------------------------------------
   F_SEED_DIR="$STATE/seed"; rm -rf "$F_SEED_DIR"; mkdir -p "$F_SEED_DIR"
   # Literal token replacement (no sed: a password with & or | must survive).
-  V="$REPO/guest/vendor"
   KDEVM_USER_NAME="$USER_NAME" KDEVM_PASS="$(tr -d '\n' < "$PASS_FILE")" KDEVM_SSHKEY="$(tr -d '\n' < "$SSH_PUB")" \
-  python3 - "$REPO/guest/user-data.yaml.tmpl" "$F_SEED_DIR/user-data" \
-    "$V/omarchy-native-clipboard-bridge" "$V/omarchy-native-clipboard-bridge.service" \
-    "$V/92-omarchy-native-clipboard.rules" "$V/90-try-omarchy-quantum.conf" \
-    "$REPO/guest/files/firefox-policies.json" "$REPO/guest/files/kdevm-timezone" <<'PY'
-import base64, json, os, sys
-tmpl, out, agent, unit, udev, quantum, firefox, timezone = sys.argv[1:]
-b64 = lambda p: base64.b64encode(open(p, "rb").read()).decode()
+  python3 - "$REPO/guest/user-data.yaml.tmpl" "$F_SEED_DIR/user-data" "$REPO/guest" <<'PY'
+import base64, json, os, re, sys
+tmpl, out, guest = sys.argv[1:]
 text = open(tmpl, encoding="utf-8").read()
+# @@B64:<path under guest/>@@ inlines that file, base64. Done before the
+# user's values go in, so nothing in a password or key is ever expanded.
+text = re.sub(r"@@B64:([A-Za-z0-9._/-]+)@@",
+              lambda m: base64.b64encode(open(os.path.join(guest, m.group(1)), "rb").read()).decode(), text)
 for k, v in {
     "@@USER@@": os.environ["KDEVM_USER_NAME"],
     # JSON strings are valid YAML double-quoted scalars: any password survives
@@ -120,12 +119,6 @@ for k, v in {
     # returns two surrogates for an emoji and the guest cannot encode them).
     "@@PASS@@": json.dumps(os.environ["KDEVM_PASS"], ensure_ascii=False),
     "@@SSHKEY@@": json.dumps(os.environ["KDEVM_SSHKEY"], ensure_ascii=False),
-    "@@B64_CLIPBOARD_AGENT@@": b64(agent),
-    "@@B64_CLIPBOARD_UNIT@@": b64(unit),
-    "@@B64_CLIPBOARD_UDEV@@": b64(udev),
-    "@@B64_PIPEWIRE_QUANTUM@@": b64(quantum),
-    "@@B64_FIREFOX_POLICIES@@": b64(firefox),
-    "@@B64_TIMEZONE_AGENT@@": b64(timezone),
 }.items():
     text = text.replace(k, v)
 open(out, "w", encoding="utf-8").write(text)
@@ -210,6 +203,8 @@ has 9pnet          CONFIG_NET_9P
 has 9pnet_virtio   CONFIG_NET_9P_VIRTIO
 has snd_hda_intel  CONFIG_SND_HDA_INTEL
 has qemu_fw_cfg    CONFIG_FW_CFG_SYSFS
+# the battery module is ours to build (DKMS, guest/vendor/try-omarchy-battery)
+if /usr/sbin/modinfo -k "$krel" -n try_omarchy_battery >/dev/null 2>&1; then echo "ok   try_omarchy_battery (DKMS)"; else echo "FAIL try_omarchy_battery (DKMS did not build it for $krel)"; fail=1; fi
 if grep -q '^CONFIG_PAGE_REPORTING=y' "$cfg"; then echo "ok   free-page reporting (CONFIG_PAGE_REPORTING)"; else echo "FAIL CONFIG_PAGE_REPORTING"; fail=1; fi
 echo "sessions wayland: $(ls /usr/share/wayland-sessions 2>/dev/null | tr '\n' ' ')"
 echo "sessions x11:     $(ls /usr/share/xsessions 2>/dev/null | tr '\n' ' ')"
