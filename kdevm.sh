@@ -19,9 +19,9 @@
 # Config: environment variables, optionally set in ~/.config/kdevm/env
 # (sourced if present). KDEVM_CPUS (4) KDEVM_MEM_MB (8192) KDEVM_SCALE
 # (auto|1|2) KDEVM_SHARE (~/kdevm-share) KDEVM_FULLSCREEN (off) KDEVM_WINDOW
-# (auto|keep|WxH) KDEVM_USER (your login name) KDEVM_RUNTIME_ROOT
-# (~/.local/share/kdevm/runtime) KDEVM_STATE (~/.cache/kdevm). Everything
-# large lives outside the repo.
+# (auto|keep|WxH) KDEVM_ICON (assets/kdevm-icon.png) KDEVM_USER (your login
+# name) KDEVM_RUNTIME_ROOT (~/.local/share/kdevm/runtime) KDEVM_STATE
+# (~/.cache/kdevm). Everything large lives outside the repo.
 set -euo pipefail
 umask 077   # overlay, vars store, sockets, logs: owner-only from creation
 
@@ -149,6 +149,29 @@ print(1)' ;;
   esac
 }
 
+# Dock icon. The runtime's Cocoa product-identity patch loads TryOmarchy.icns
+# from the runtime root (three directories above the binary; the file name is
+# compiled in), and without that file the Dock shows the generic "exec" icon.
+# Built on every up (a quarter of a second) from a square PNG: KDEVM_ICON,
+# else the one in the repo. sips can exit 0 without writing anything, so each
+# output is checked; iconutil only writes to a name ending in .icns.
+# Cosmetic: the caller turns a failure into a warning.
+install_icon() {
+  local src="${KDEVM_ICON:-$REPO/assets/kdevm-icon.png}" dest="${RT:h}/TryOmarchy.icns" new="${RT:h}/TryOmarchy.new.icns" set="$STATE/icon.iconset" s f
+  [[ -f "$src" ]] || return 1
+  {
+    rm -rf "$set"; mkdir "$set" || return 1
+    for s in 16 32 128 256 512; do
+      f="$set/icon_${s}x${s}.png"
+      sips -z $s $s "$src" --out "$f" >/dev/null 2>&1; [[ -s "$f" ]] || return 1
+      f="$set/icon_${s}x${s}@2x.png"
+      sips -z $((s * 2)) $((s * 2)) "$src" --out "$f" >/dev/null 2>&1; [[ -s "$f" ]] || return 1
+    done
+    iconutil -c icns -o "$new" "$set" 2>/dev/null || return 1
+    mv -f "$new" "$dest" || return 1
+  } always { rm -rf "$set" "$new" }
+}
+
 ensure_runtime() { [[ -x "$QEMU" && -x "$HELPER" ]] || { log "runtime missing; building"; "$REPO/runtime/build.sh"; }; }
 # The factory is built by THIS process (which holds the lock), never delegated.
 ensure_factory() { [[ -f "$FACTORY" ]] || { log "factory missing; building (about 2 min)"; kdevm_factory_build; }; }
@@ -167,6 +190,7 @@ up() {
   local stray; stray=$(pgrep -f -- "file=$WORK" | head -1 || true)
   [[ -n "$stray" ]] && die "a QEMU already runs on $WORK (pid $stray) but is not tracked; stop it (kdevm.sh ssh 'sudo poweroff', or kill $stray) before up"
   rm -f "$QMP" "$CLIP"
+  install_icon || log "warning: could not build the Dock icon from ${KDEVM_ICON:-$REPO/assets/kdevm-icon.png}; the Dock icon is unchanged"
   # The helper's bridges accept only a socket owned by this uid with no
   # group/other bits (NativeBridgeSocket.swift); the script-wide umask 077
   # makes QEMU create them that way.

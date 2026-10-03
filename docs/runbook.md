@@ -238,6 +238,33 @@ times (duplicate tracked `up`, untracked overlay holder, malformed QMP
 replies, readiness timing, more supervisor shutdown permutations). The
 house rule asks for two consecutive clean passes; this is the first.
 
+## Dock icon (2026-10-03, Charles)
+
+The Dock showed the generic black "exec" icon for the running VM. Cause: the
+Cocoa product-identity patch replaces QEMU's own icon lookup with
+`cocoa_set_product_icon()`, which loads `TryOmarchy.icns` from three
+directories above `argv[0]`. In their app bundle that is the Resources
+folder; for `$KDEVM_RUNTIME_ROOT/current/bin/qemu-system-aarch64` it is the
+runtime root, where no such file existed. The name is compiled into the
+binary (our rebrand rewrites "Try Omarchy" with a space, not this name), so
+the fix is to put a file there, not to rebuild: `up` converts a square PNG
+(`KDEVM_ICON`, default `assets/kdevm-icon.png`) with `sips` and `iconutil`
+and moves the result into place. It takes a quarter of a second, so it runs
+on every `up` and there is no cache to go stale.
+
+- `sips` exits 0 for a missing input and writes nothing; each output file is
+  checked instead of the exit status.
+- `iconutil -o` refuses a name that does not end in `.icns` ("Failed to
+  generate ICNS"), so the temporary file is `TryOmarchy.new.icns`.
+- The artwork: one gpt-image-2.5 render of a full-bleed square (a Mac title
+  bar with traffic lights over a Plasma-blue desktop and a terminal with a
+  green prompt; no text and no logos, so it can ship here), then cut in code
+  to a superellipse 824 px wide on the 1024 canvas with a thin azure rim and
+  a soft shadow. The model drew the traffic lights too close to the corner;
+  they were moved 85 px inboard in code.
+- Seen after `up`: the icon in the Dock with the running dot, the same size
+  as its neighbours (screen capture, 3840x2160).
+
 ## Rules that are easy to forget
 
 - `gic-version=3` is mandatory under HVF on this QEMU; it rejects GICv2.

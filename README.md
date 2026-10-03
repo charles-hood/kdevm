@@ -101,6 +101,7 @@ every script):
 | `KDEVM_SCALE` | auto | Plasma scale hint: auto = main display pixels / points, or 1, 2 |
 | `KDEVM_WINDOW` | auto | first-window size: auto (display minus margins), keep, or `WxH` points |
 | `KDEVM_FULLSCREEN` | off | open full screen |
+| `KDEVM_ICON` | `assets/kdevm-icon.png` | the Dock icon: a square PNG (1024x1024 with transparency is ideal), converted on every `up` |
 | `KDEVM_SHARE` | `~/kdevm-share` | the Mac folder shared with the guest, mounted at `~/Mac` there |
 | `KDEVM_USER` | your login name | the guest user |
 | `KDEVM_PASS_FILE` | `~/.config/kdevm/password` | the guest user's password (generated if missing) |
@@ -114,7 +115,7 @@ every script):
 | | |
 |---|---|
 | the repo | `kdevm.sh`, `lib/kdevm-common.zsh` (kernel lock, process identity, QMP, config), `guest/factory.zsh` (the factory build as a function), the build scripts, the cloud-init template, vendored guest agents, `tests/checks.sh`, docs. Nothing large, nothing secret. |
-| `$KDEVM_RUNTIME_ROOT/<pin>/` | built QEMU + helper, `provenance.txt`, `current` symlink. Slow to rebuild, keep it. |
+| `$KDEVM_RUNTIME_ROOT/<pin>/` | built QEMU + helper, `provenance.txt`, `current` symlink. Slow to rebuild, keep it. Beside the pins: `TryOmarchy.icns`, the Dock icon `up` builds (the name is the one the runtime looks for). |
 | `$KDEVM_STATE/` | base image, `factory.qcow2`, `work.qcow2`, `efivars.fd`, `run/` sockets, logs. Disposable. |
 | `$KDEVM_SHARE/` | the one shared folder. An exchange folder, not a build tree. |
 

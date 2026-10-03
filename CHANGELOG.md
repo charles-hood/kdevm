@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- Dock icon: `kdevm.sh up` builds `TryOmarchy.icns` in the runtime root from
+  `assets/kdevm-icon.png` (or the square PNG named by `KDEVM_ICON`), which is
+  where the runtime's Cocoa product-identity patch looks for it. The Dock
+  showed the generic black "exec" icon before. No runtime rebuild is
+  involved; an unusable icon is a warning and the desktop still starts. Two
+  more offline checks (51 in all).
+
 ## 0.1.0 (2026-10-02)
 
 First release. One evening from empty directory to an accepted desktop,

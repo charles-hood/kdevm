@@ -278,9 +278,13 @@ EOF
   printf '#!/bin/sh\necho 48000\n' > "$FRT/bin/omarchy-vm-helper"; chmod +x "$FRT/bin/omarchy-vm-helper"
   "$QI" create -q -f qcow2 "$T/v10/factory.qcow2" 1M
   : > "$T/v10/code.fd"; : > "$T/v10/vars.fd"
-  out=$(KDEVM_STATE="$T/v10" KDEVM_RUNTIME_ROOT="$T/fakert" KDEVM_FW_CODE="$T/v10/code.fd" KDEVM_FW_VARS="$T/v10/vars.fd" KDEVM_SHARE="$T/v10/share" KDEVM_WINDOW=keep ./kdevm.sh up 2>&1); rc=$?
+  out=$(KDEVM_STATE="$T/v10" KDEVM_RUNTIME_ROOT="$T/fakert" KDEVM_FW_CODE="$T/v10/code.fd" KDEVM_FW_VARS="$T/v10/vars.fd" KDEVM_SHARE="$T/v10/share" KDEVM_WINDOW=keep KDEVM_ICON= ./kdevm.sh up 2>&1); rc=$?
   left=$(pgrep -f "$FRT/bin/qemu-system-aarch64" || true)
   if [[ $rc -ne 0 && -z "$left" && ! -e "$T/v10/qemu.pid" && "$out" == *"failed to start"* ]]; then pass "failed readiness: fake QEMU terminated, non-zero exit, no pid file"; else fail "failed readiness (rc=$rc, leftover='$left')"; [[ -n "$left" ]] && kill $left 2>/dev/null; fi
+  # 10a. Dock icon: the same up built TryOmarchy.icns in the runtime root (where
+  #      the patched QEMU looks) from the repo's PNG and left no work files
+  ICNS="$T/fakert/TryOmarchy.icns"
+  if [[ "$(head -c 4 "$ICNS" 2>/dev/null)" == icns && ! -e "$T/fakert/TryOmarchy.new.icns" && ! -e "$T/v10/icon.iconset" && "$out" != *"Dock icon"* ]]; then pass "Dock icon: icns built in the runtime root from the default PNG, no work files left"; else fail "Dock icon install ($(ls "$T/fakert" | tr '\n' ' '))"; fi
   # 10b. start-time capture fails right after launch: the child is terminated, not orphaned
   rm -rf "$T/v10/run" "$T/v10/work.qcow2" "$T/v10/vars.fd"; : > "$T/v10/vars.fd"
   cat > "$T/fakebin2/ps" <<'EOF'
@@ -291,6 +295,15 @@ EOF
   out=$(PATH="$T/fakebin2:$PATH" KDEVM_STATE="$T/v10" KDEVM_RUNTIME_ROOT="$T/fakert" KDEVM_FW_CODE="$T/v10/code.fd" KDEVM_FW_VARS="$T/v10/vars.fd" KDEVM_SHARE="$T/v10/share" KDEVM_WINDOW=keep ./kdevm.sh up 2>&1); rc=$?
   left=$(pgrep -f "$FRT/bin/qemu-system-aarch64" || true)
   if [[ $rc -ne 0 && -z "$left" && ! -e "$T/v10/qemu.pid" && "$out" == *"start time"* ]]; then pass "launch-time start capture failure: child terminated, no pid file"; else fail "start capture failure (rc=$rc, leftover='$left')"; [[ -n "$left" ]] && kill $left 2>/dev/null; fi
+  # 10c. an unusable KDEVM_ICON is a warning, not a stop: up goes on to launch
+  #      QEMU (it reaches the start-time failure above) and the icns in place
+  #      is untouched
+  rm -rf "$T/v10/run" "$T/v10/work.qcow2" "$T/v10/vars.fd"; : > "$T/v10/vars.fd"
+  printf 'not an image' > "$T/v10/bad.png"; before=$(shasum "$ICNS" 2>/dev/null)
+  out=$(PATH="$T/fakebin2:$PATH" KDEVM_STATE="$T/v10" KDEVM_RUNTIME_ROOT="$T/fakert" KDEVM_FW_CODE="$T/v10/code.fd" KDEVM_FW_VARS="$T/v10/vars.fd" KDEVM_SHARE="$T/v10/share" KDEVM_WINDOW=keep KDEVM_ICON="$T/v10/bad.png" ./kdevm.sh up 2>&1); rc=$?
+  left=$(pgrep -f "$FRT/bin/qemu-system-aarch64" || true)
+  if [[ "$out" == *"could not build the Dock icon"* && "$out" == *"start time"* && -n "$before" && "$(shasum "$ICNS")" == "$before" && ! -e "$T/fakert/TryOmarchy.new.icns" && ! -e "$T/v10/icon.iconset" ]]; then pass "Dock icon: unusable KDEVM_ICON warns, up continues, existing icns untouched"; else fail "Dock icon failure handling (rc=$rc)"; fi
+  [[ -n "$left" ]] && kill $left 2>/dev/null
 else
   echo "SKIP  failed-readiness probe (no qemu-img)"
 fi
