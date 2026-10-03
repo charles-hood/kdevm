@@ -37,10 +37,22 @@ if [[ ! -d "$SRC/.git" ]]; then
   git -C "$SRC" remote add origin "$UPSTREAM"
 fi
 git -C "$SRC" fetch -q --depth 1 origin "$PIN"
+git -C "$SRC" checkout -q -- . 2>/dev/null || true     # drop last build's rebrand edits
 git -C "$SRC" checkout -q --detach FETCH_HEAD
 git -C "$SRC" clean -qfd -e .build -e macos/.build
 
-echo "== build QEMU/VirGL runtime (their script, unchanged)"
+# The one change to their tree: the Cocoa product-identity patch hard-codes
+# "Try Omarchy" as the process name and in the application menu (About, Hide,
+# Quit, the quit alert). Rebrand the patch to "kdevm" and update the SHA-256
+# their build script checks it against. Everything else is applied as is.
+echo "== rebrand the product-identity patch: Try Omarchy -> kdevm"
+PATCH="$SRC/macos/patches/qemu-cocoa-product-identity.patch"
+sed -i '' 's/Try Omarchy/kdevm/g' "$PATCH"
+NEWSHA=$(shasum -a 256 "$PATCH" | awk '{print $1}')
+sed -i '' "s/^identity_patch_sha256=.*/identity_patch_sha256=$NEWSHA/" "$SRC/macos/build-qemu-gpu-runtime.sh"
+grep -q "^identity_patch_sha256=$NEWSHA" "$SRC/macos/build-qemu-gpu-runtime.sh" || { echo "could not pin the rebranded patch hash" >&2; exit 1; }
+
+echo "== build QEMU/VirGL runtime (their script, otherwise unchanged)"
 ( cd "$SRC" && bash macos/build-qemu-gpu-runtime.sh )
 t1=$(date +%s)
 echo "== runtime built in $((t1 - t0)) s"

@@ -37,6 +37,18 @@ fact was established on the M4 Pro.
   `--host-timezone` (America/New_York) and `--host-audio-frequency output|input`
   (48000 / 48000) outside an app bundle.
 
+## Branding (2026-10-02 22:43)
+
+The application menu read "About Try Omarchy / Hide Try Omarchy / Quit Try
+Omarchy" and the quit alert named it too: the Cocoa product-identity patch
+hard-codes the strings and sets the process name. `runtime/build.sh` now
+rewrites that one patch to say "kdevm" after checkout and pins the new
+SHA-256 into their build script (which verifies every patch hash); nothing
+else in their tree is touched. Rebuild took 88 s. The helper's own log line
+("The Mac clipboard is shared with Omarchy") is left alone. The window title
+comes from `-name kdevm`. A rebuilt runtime has a new ad-hoc signature, so
+macOS re-asks the Microphone permission once.
+
 ## Rules that are easy to forget
 
 - `gic-version=3` is mandatory under HVF on this QEMU; it rejects GICv2.
