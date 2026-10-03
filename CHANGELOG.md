@@ -1,157 +1,128 @@
 # Changelog
 
-## Unreleased
+## 0.2.0 (2026-10-03)
 
-First review pass on the work below (Codex, discovery, commit 5763b80); the
-fixes so far:
+Three host integrations from the roadmap, a guest that can no longer strand
+itself, and a lifecycle rebuilt on facts the kernel keeps. The work was
+reviewed in six passes by two independent reviewers on different models
+(Codex and Claude Opus 5.5) against a frozen rubric; the pass-by-pass record,
+with every finding and what was done about it, is in
+[docs/runbook.md](docs/runbook.md).
 
-- `down`, `destroy`, `rebuild` and `up` refuse while the overlay is open in
-  another process. The test is the disk's own lock: QEMU locks every image
-  it opens and `qemu-img` will not open one that is held for writing. It
-  does not depend on the pid record, on how the state directory's path is
-  spelled (`/tmp/state/.` or a symlink names the same disk), or on any
-  process's command line. Before, a VM the record did not vouch for counted
-  as "not running", and `destroy` or `rebuild` then removed the overlay and
-  the UEFI variables from under it; updating from 0.1.0 with the VM still
-  running produced exactly that mismatch.
-- The guest no longer powers itself off at a critical battery level. UPower
-  has its own critical action, separate from Plasma's; with sleep disabled
-  it fell through to PowerOff, and a guest at 1% shut down 22 seconds later.
-  It is now `Ignore`, and the factory build fails if that did not take.
-- Two runtime builds can no longer share a scratch checkout or a runtime
-  root: the second could revert the first one's rebrand under its compiler.
-  The locks are inherited by everything a build starts, so they hold while
-  a compiler left behind by a killed build is still running.
-- `KDEVM_TIMEZONE` is validated before anything is built; the rendered-seed
-  checks are skipped together when PyYAML is missing; the Dock icon is built
-  under a name no other `up` shares.
-- The bridge supervisor written for this release is gone (see below): the
-  review found that it tracked its helpers by bare pid and that its own exit
-  was taken as proof that they had ended. Each helper now has a full
-  identity record of its own, a helper that will not end keeps its record
-  and makes `down` exit 2, and `status` no longer searches the process table
-  by socket path.
-- Second review pass (commit b133a06). Each helper now registers itself: a
-  launcher writes its own pid and start time to the bridge's record and
-  then becomes the helper, so no helper ever runs without a record and none
-  is ever signalled by a bare pid; one that cannot register is not started.
-  `status` writes nothing at all (it could delete the record of a VM that a
-  concurrent `up` had just started).
-- First closure pass (commit bde8dd5) against the frozen rubric: eleven
-  items not met, most of them in code unchanged since 0.1.0 that the rubric
-  now covers. There is one way to start a process and one way to stop one,
-  used for QEMU and for every helper. `launch_tracked`: the record file is
-  written by the launcher itself and put in place with an atomic hard link
-  (see the next entry), so a delayed launcher can never touch a newer
-  session's record, and QEMU too is recorded before it exists. `stop_tracked`: every signal, SIGKILL included,
-  is sent only after the record has been checked against the live process,
-  and a record is dropped only once the exit is confirmed; a QEMU that
-  cannot be confirmed stopped keeps its record, `down` exits 2, and
-  `destroy` and `rebuild` remove nothing (they also check the disk's lock
-  again just before removing). Also: `down` clears sockets a crashed QEMU
-  left; `status` no longer lets ssh write `known_hosts`; the Cocoa rename in
-  the runtime build is verified like the helper's; the time zone receiver
-  drops an overlong line whole instead of reading its tail as a message;
-  the seed renderer makes one pass, so a password such as `@@SSHKEY@@` stays
-  a password; `ssh` and `nc` are failing stubs for the whole test suite.
-- Second closure pass (commit 47c0a61), by two reviewers on different
-  models: sixteen and seventeen of twenty-two items met. A process now
-  registers with one atomic step: its launcher writes pid and start time to
-  a private file and hard-links it to the record, which the kernel refuses
-  if a record is there. A record is never half-written, never overwritten,
-  and a caller that gives up on a slow launcher cancels it with an empty
-  record the launcher cannot link over (this replaces the first closure
-  pass's descriptor hand-off, which left a few milliseconds in which a
-  process could end up running with no record). The factory build's
-  provisioning VM is started and stopped by the same two functions as
-  everything else (it was still signalled by a bare pid); a record that
-  exists but cannot be read is kept, not deleted; a failed `up` removes its
-  sockets even when QEMU could not be confirmed stopped; a password with
-  DEL, a C1 control or U+2028 no longer breaks the seed; the README has an
-  Upgrading section; checks that need the builder's tools are skipped
-  without them; several checks were strengthened so that removing the
-  behaviour they name makes them fail; and the tests end only processes
-  they started, by pid.
-- Third closure pass (commit 0c402b5), both reviewers again: nineteen and
-  twenty of twenty-two items met, and nothing that can cost data. Fixed: a
-  state directory with pattern characters in its name (`[`, `*`) is matched
-  as literal text; a failed factory build leaves its disk and vars copy
-  alone if the provisioning VM cannot be confirmed stopped; a launcher gives
-  up by itself after four seconds; U+FFFE and U+FFFF are escaped in the
-  seed. Found while fixing: inside its own EXIT trap zsh reported success
-  for a failed command substitution, so the identity check read an exited
-  process as present; it now reads `kill`'s words, not its status. Left as
-  stated limits: the factory build's `pgrep` guard can be tripped by a
-  process that only names the disk (it fails closed), and a launcher frozen
-  for longer than its caller waits could still register in the instant
-  after a later `destroy` has checked the disk.
-- A last, narrow check of that final diff by the second reviewer found no
-  regressions. Two small things from it are in: the launcher resets
-  `SECONDS` (zsh takes an exported value, which would have tripped the
-  four-second deadline on every launch), and a factory build stops a
-  provisioning VM left by an earlier, killed build before it replaces that
-  VM's disk, not after. The review is closed. 98 offline checks in all.
+### Upgrading from 0.1.0
 
-- Battery mirroring: the Mac's battery appears in the guest as a real
-  `BAT0`/`ADP0` (charge, state, time estimates, cycle count), so UPower and
-  Plasma's battery applet read it like any laptop's. try-omarchy's helper
-  (`--bridge-native-battery`) sends snapshots on a third virtio port; their
-  guest side is vendored verbatim: an agent and a small kernel module that
-  DKMS builds in the factory (GPL-2.0-only; the rest of the repository stays
-  MIT). The factory gains `dkms`, the kernel headers, a compiler and
-  `powerdevil` (about 300 MB) and a thirteenth capability check. A Mac
-  without a battery shows as mains only. Needs `kdevm.sh rebuild`.
-- Sleep is disabled in the guest (`/etc/systemd/sleep.conf.d`). A suspended
-  guest cannot be woken on this machine type: QEMU reports it as running,
-  `system_wakeup` is refused and keys do nothing, so it had to be killed.
-  That was already reachable from Plasma's Sleep button; with a power
-  manager installed it would also have been reachable from an idle timer.
-  The battery is shown, never acted on: no action at a critical level, no
-  dimming or screen-off on idle.
-- The template inlines files with one generic token
-  (`@@B64:<path under guest/>@@`); the renderer no longer takes a list of
-  files. Two more offline checks (65 in all).
+1. Stop the VM with the version that started it (`./kdevm.sh down`), then
+   update the checkout. A VM left running across the update is not
+   recognised by the new scripts: they refuse to touch its disk, and it has
+   to be powered off from inside the guest.
+2. The next `./kdevm.sh up` rebuilds the runtime once (about two minutes).
+   macOS may ask for the microphone again.
+3. Run `./kdevm.sh rebuild` for the guest-side changes. It replaces the
+   overlay; the factory grows by about 300 MB.
+4. An old `clipboard-bridge.log` in the state directory can be deleted.
 
-- Dock name: the running VM is labelled "kdevm" in the Dock, Force Quit and
-  crash reports, not "qemu-system-aarch64". The runtime stages QEMU as
-  `bin/kdevm`, which is how try-omarchy's app build gets its own name there,
-  and the one line of their helper that names the process its bridges accept
-  is rebranded to match. The next `up` rebuilds the runtime once (about two
-  minutes); macOS may ask for the microphone again.
+### New
 
-- Time zone mirroring (the second roadmap item): the guest's time zone
-  follows the Mac's, live. try-omarchy's helper
-  (`--bridge-native-timezone`) writes the Mac's zone to a second virtio port
-  every five seconds; a small root service in the guest
+- **Time zone mirroring.** The guest's time zone follows the Mac's, live.
+  try-omarchy's helper (`--bridge-native-timezone`) writes the Mac's zone to
+  a virtio port every five seconds; a small root service in the guest
   (`guest/files/kdevm-timezone`, started by udev when the port exists)
-  applies it with `timedatectl`. The Mac always wins; `KDEVM_TIMEZONE=off`
-  leaves the port out and the guest keeps its own zone. Needs a factory
-  built from this version: `kdevm.sh rebuild`. The template no longer sets
-  a zone (it was America/New_York): a fresh guest is on UTC for the two
-  seconds before the Mac's zone arrives, and stays there with mirroring off.
-- Process identity no longer depends on the Mac's time zone. `ps` prints a
-  process's start time in the caller's zone, so a VM started in one zone
-  and inspected from another was reported as not running; the lookup is now
-  pinned to UTC and the C locale. Update with the VM stopped: a VM that is
-  running across the update is no longer recognised; kdevm refuses to treat
-  it as stopped and it has to be powered off from inside the guest.
-- Host bridges are tracked one by one. `up` starts one helper per bridge
-  (clipboard, battery, time zone) and gives each its own record,
-  `bridge-<name>.pid`, checked by command line and start time exactly as
-  QEMU's is; `status` has a line per bridge and `down` confirms each exit.
-  0.1.0 ran the clipboard helper in a restart loop under a supervisor
-  process (which, it turned out, had been running in zsh's ksh emulation
-  because its name starts with "k"). There is no supervisor now and nothing
-  restarts a helper: one that exits is reported `NOT RUNNING` and comes back
-  with the next `down` and `up`. An old `clipboard-bridge.log` in the state
-  directory can be deleted.
+  applies it with `timedatectl`. The Mac always wins. `KDEVM_TIMEZONE=off`
+  leaves the port out and the guest keeps its own zone (UTC in a fresh
+  factory: the template no longer sets one).
+- **Battery mirroring.** The Mac's battery appears in the guest as a real
+  `BAT0`/`ADP0` (charge, state, time estimates, cycle count), so UPower and
+  Plasma's battery applet read it like any laptop's. The helper
+  (`--bridge-native-battery`) sends snapshots on another virtio port;
+  try-omarchy's guest side is vendored verbatim: an agent and a small
+  kernel module that DKMS builds in the factory. A Mac without a battery
+  shows as mains only. The battery is shown, never acted on: neither
+  Plasma's power manager nor UPower does anything at a critical level.
+- **Dock name and icon.** The running VM is "kdevm" in the Dock, Force Quit
+  and crash reports, with its own icon (`assets/kdevm-icon.png`, or the
+  square PNG named by `KDEVM_ICON`). The runtime stages QEMU as `bin/kdevm`,
+  which is how try-omarchy's app build gets its own name there, and the one
+  line of their helper that names the process its bridges accept is
+  rebranded to match.
 
-- Dock icon: `kdevm.sh up` builds `TryOmarchy.icns` in the runtime root from
-  `assets/kdevm-icon.png` (or the square PNG named by `KDEVM_ICON`), which is
-  where the runtime's Cocoa product-identity patch looks for it. The Dock
-  showed the generic black "exec" icon before. No runtime rebuild is
-  involved; an unusable icon is a warning and the desktop still starts. Two
-  more offline checks (51 in all).
+### Fixed (present in 0.1.0)
+
+- **A suspended guest could not be woken.** QEMU reported it as running,
+  `system_wakeup` was refused and keys did nothing, so it had to be killed;
+  Plasma's Sleep button was enough to get there. Sleep is now disabled in
+  the guest (`/etc/systemd/sleep.conf.d`), and the factory build fails if
+  logind does not agree.
+- **`destroy` and `rebuild` could remove the disks of a running VM** that
+  the pid record did not vouch for, which is what updating under a running
+  VM produces. `up`, `down`, `destroy` and `rebuild` now refuse while the
+  overlay is open in another process. The test is the disk's own lock (QEMU
+  locks every image it opens), so it does not depend on the record, on how
+  the state directory's path is spelled, or on any command line.
+- **Process identity depended on the Mac's time zone and locale.** `ps`
+  prints a start time in the caller's zone, so a VM started in one zone and
+  inspected from another was "not running". The lookup is pinned.
+- **`down` could signal the wrong process or lose track of QEMU.** Its
+  forced stop sent SIGKILL to a bare pid after a delay and dropped the
+  record without confirming the exit. Every signal is now sent only after
+  the record has been checked against the live process, and a record goes
+  only when the exit is confirmed; otherwise `down` exits 2 and `destroy`
+  and `rebuild` remove nothing.
+- **`status` could delete a record** that a concurrent `up` had just
+  written, and let ssh add the guest key to `known_hosts`. It now writes
+  nothing.
+- **Seed rendering.** A password such as `@@SSHKEY@@` was expanded by the
+  next replacement, and one containing DEL, a C1 control, U+2028, U+FFFE or
+  U+FFFF broke the YAML. The renderer makes one pass and escapes those
+  characters.
+- A state directory with pattern characters in its name (`[`, `*`) hid a
+  live QEMU from its own record. A crashed QEMU's sockets were left behind
+  by `down`. Two runtime builds at once could work in the same checkout;
+  builds now hold a lock that their compilers inherit.
+
+### Changed
+
+- **One way to start a process and one way to stop one**, for QEMU, every
+  bridge helper and the factory's provisioning VM (`launch_tracked` and
+  `stop_tracked` in `lib/kdevm-common.zsh`). A process registers itself
+  before it exists: its launcher writes pid and start time to a private
+  file and hard-links it to the record, which the kernel refuses if a
+  record is already there, and only then execs. `kdevm.sh` sends no signal
+  of its own.
+- **No bridge supervisor.** `up` starts one helper per bridge (clipboard,
+  battery, time zone), each with its own record, `bridge-<name>.pid`.
+  `status` has a line per bridge. Nothing restarts a helper: one that exits
+  is reported `NOT RUNNING` and comes back with the next `down` and `up`.
+  (0.1.0 ran the clipboard helper in a restart loop under a supervisor,
+  which, it turned out, had been running in zsh's ksh emulation because its
+  name starts with "k".)
+- **Factory.** It gains `dkms`, the kernel headers, a compiler and
+  `powerdevil`, takes about two minutes to build (102 to 137 s over nine
+  builds) and 4.3 GB on disk, and runs sixteen checks that fail the build,
+  among them the battery module, the no-sleep setting and UPower's critical
+  action.
+- **Template.** Files are inlined with one generic token
+  (`@@B64:<path under guest/>@@`); `KDEVM_TIMEZONE` is validated before
+  anything is built.
+- **Licence.** `guest/vendor/try-omarchy-battery/` (the kernel module) is
+  GPL-2.0-only and carries its licence text; everything else stays MIT.
+- **Tests.** 98 offline checks (49 in 0.1.0), with `ssh` and `nc` replaced
+  by failing stubs for the whole suite. They include end-to-end runs of
+  `up`, `status`, `down` and `destroy` against a fake QEMU that answers QMP,
+  and direct tests of the two lifecycle functions.
+
+### Known limits
+
+- A bridge helper that dies stays down until the next `down` and `up`.
+- The factory's own checks and the runtime build's rename verification run
+  only inside a real build; the offline suite does not exercise them.
+- The factory build's guard against a leftover provisioning VM matches
+  command lines, so a process that merely names the disk (a log viewer)
+  makes `factory` and `rebuild` refuse. It fails closed.
+- A launcher frozen for longer than its caller waits (five seconds) could
+  still register in the instant after a later `destroy` has checked the
+  disk. Launchers give up by themselves after four seconds.
+- Boot time, idle CPU and idle memory in the README were measured on 0.1.0
+  and have not been measured again with the bridges and the power applet.
 
 ## 0.1.0 (2026-10-02)
 
