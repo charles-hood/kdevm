@@ -76,6 +76,29 @@ bridge_pid() {
   st=$(pid_state "$PF_PID" "$PF_START" "$BRIDGE_PATTERN")
   case $st in running) echo "$PF_PID" ;; absent) rm -f "$BRIDGEPID" ;; esac
 }
+bridge_state() { local PF_PID PF_START; read_pidfile "$BRIDGEPID" || { echo absent; return 0; }; pid_state "$PF_PID" "$PF_START" "$BRIDGE_PATTERN"; }
+# Stop the clipboard supervisor with the same tri-state rules as QEMU:
+# running -> signal, remove the record only after the exit is confirmed;
+# absent  -> remove the stale record;
+# unknown -> signal nothing, keep the record, say so. Returns 1 when the
+# record had to be preserved (unknown, or no confirmed exit).
+stop_bridge() {
+  local PF_PID PF_START st i
+  read_pidfile "$BRIDGEPID" || return 0
+  st=$(pid_state "$PF_PID" "$PF_START" "$BRIDGE_PATTERN")
+  case $st in
+    running)
+      kill "$PF_PID" 2>/dev/null || true
+      for i in {1..25}; do kill -0 "$PF_PID" 2>/dev/null || break; sleep 0.2; done
+      if kill -0 "$PF_PID" 2>/dev/null; then
+        log "clipboard supervisor pid $PF_PID did not exit after SIGTERM; tracking preserved"; return 1
+      fi
+      rm -f "$BRIDGEPID" ;;
+    absent)  rm -f "$BRIDGEPID" ;;
+    unknown) log "clipboard supervisor pid $PF_PID could not be verified (process inspection failed); not signalled, tracking preserved"; return 1 ;;
+  esac
+  return 0
+}
 refuse_if_unknown() { # verb
   local PF_PID PF_START
   if [[ "$(qemu_state)" == unknown ]]; then
@@ -260,9 +283,12 @@ up() {
 down() {
   refuse_if_unknown "stop"
   if ! running; then
-    # No QEMU: a verified supervisor of ours (if any lingers) is stopped too.
-    local lp; lp=$(bridge_pid); [[ -n "$lp" ]] && { kill "$lp" 2>/dev/null || true; }
-    rm -f "$BRIDGEPID" "$PIDFILE"; log "not running"; return 0
+    # No QEMU: a verified supervisor of ours (if any lingers) is stopped too;
+    # an unverifiable one keeps its record and down reports it (exit 2).
+    local brc=0; stop_bridge || brc=$?
+    rm -f "$PIDFILE"; log "not running"
+    [[ $brc -eq 0 ]] || return 2
+    return 0
   fi
   local pid; pid=$(qemu_pid)
   # Plasma's power manager owns the ACPI power button and does not shut down
@@ -277,9 +303,10 @@ down() {
   fi
   for i in {1..45}; do kill -0 "$pid" 2>/dev/null || break; sleep 1; done
   if kill -0 "$pid" 2>/dev/null; then log "guest did not power off in 45 s; terminating"; kill "$pid" 2>/dev/null || true; sleep 2; kill -9 "$pid" 2>/dev/null || true; fi
-  local bpid; bpid=$(bridge_pid); [[ -n "$bpid" ]] && { kill "$bpid" 2>/dev/null || true; }
-  rm -f "$PIDFILE" "$BRIDGEPID" "$QMP" "$CLIP"
+  local brc=0; stop_bridge || brc=$?
+  rm -f "$PIDFILE" "$QMP" "$CLIP"
   log "stopped (overlay kept; 'up' resumes it)"
+  [[ $brc -eq 0 ]] || return 2
 }
 
 destroy() {
@@ -337,7 +364,10 @@ status() {
     echo "-- qemu: UNKNOWN: pid $(head -1 "$PIDFILE" | cut -d' ' -f1) is alive but could not be inspected; lifecycle verbs will refuse until this is resolved"
   elif running; then
     echo "-- qemu: pid $(qemu_pid), $(qmp query-status 2>/dev/null || echo 'QMP not answering')"
-    [[ -n "$(bridge_pid)" ]] && echo "-- clipboard bridge: supervisor pid $(bridge_pid), helper $(pgrep -f 'bridge-native-clipboard' | head -1 || echo not-running)"
+    case "$(bridge_state)" in
+      running) echo "-- clipboard bridge: supervisor pid $(bridge_pid), helper $(pgrep -f 'bridge-native-clipboard' | head -1 || echo not-running)" ;;
+      unknown) echo "-- clipboard bridge: UNKNOWN: pid $(head -1 "$BRIDGEPID" | cut -d' ' -f1) could not be inspected; tracking preserved" ;;
+    esac
     if nc -z -G 2 localhost "$SSH_PORT" 2>/dev/null; then
       echo "-- ssh: localhost:$SSH_PORT answering"
       ssh "${SSH_OPTS[@]}" -o BatchMode=yes "$USER_NAME@localhost" \

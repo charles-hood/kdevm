@@ -18,6 +18,9 @@ trap 'rm -rf "$T"' EXIT
 mkdir -p "$T/fx"; printf 'fixture-password' > "$T/fx/password"; chmod 600 "$T/fx/password"
 printf 'ssh-ed25519 AAAAFIXTURE checks\n' > "$T/fx/key.pub"
 export KDEVM_PASS_FILE="$T/fx/password" KDEVM_SSH_PUB="$T/fx/key.pub"
+# Offline, inside the fixture: the runtime builder and the base-image download
+# refuse under KDEVM_OFFLINE=1, and any scratch work would land in $T.
+export KDEVM_OFFLINE=1 KDEVM_SCRATCH="$T/scratch"
 fails=0
 pass() { echo "PASS  $1"; }
 fail() { echo "FAIL  $1"; fails=$((fails + 1)); }
@@ -109,6 +112,20 @@ st=$(PATH="$T/fakebin2:$PATH" zsh -c "source $REPO/lib/kdevm-common.zsh; pid_sta
 st=$(zsh -c "source $REPO/lib/kdevm-common.zsh; pid_state $SL4 'not-the-start' 'sleep*'")
 [[ "$st" == absent ]] && pass "pid_state: same command, different start time is absent (reused pid)" || fail "pid_state different start gave '$st'"
 kill $SL4 2>/dev/null; wait $SL4 2>/dev/null
+
+# 4g. clipboard supervisor whose start time cannot be inspected during down:
+#     not signalled, record kept, reported (down exits 2), not converted to absent
+mkdir -p "$T/v4g"; ARGV0="kdevm-bridge-supervisor 1" zsh -c 'sleep 120; :' & SV2=$!; sleep 0.3
+echo "$SV2 $(ps -o lstart= -p $SV2 | awk '{$1=$1; print}')" > "$T/v4g/clipboard-bridge.pid"
+cat > "$T/fakebin2/ps" <<'EOF'
+#!/bin/sh
+for a in "$@"; do [ "$a" = "lstart=" ] && exit 1; done
+exec /bin/ps "$@"
+EOF
+out=$(PATH="$T/fakebin2:$PATH" KDEVM_STATE="$T/v4g" ./kdevm.sh down 2>&1); rc=$?
+if kill -0 $SV2 2>/dev/null && [[ -f "$T/v4g/clipboard-bridge.pid" && $rc -eq 2 && "$out" == *"could not be verified"* && "$out" == *"tracking preserved"* ]]; then pass "supervisor unknown during down: not signalled, record kept, reported"; else fail "supervisor unknown during down (rc=$rc alive=$(kill -0 $SV2 2>/dev/null && echo yes || echo no) record=$([[ -f "$T/v4g/clipboard-bridge.pid" ]] && echo kept || echo removed))"; fi
+out=$(KDEVM_STATE="$T/v4g" ./kdevm.sh down 2>&1); rc=$?
+if ! kill -0 $SV2 2>/dev/null && [[ ! -f "$T/v4g/clipboard-bridge.pid" && $rc -eq 0 ]]; then pass "same supervisor with inspection working again: stopped, exit confirmed, record removed"; else fail "supervisor stop after recovery (rc=$rc)"; kill $SV2 2>/dev/null; fi
 
 # 5. lock (finding 5): kernel advisory lock (zsystem flock), held for the
 #    command's lifetime, released by the OS however the holder ends
@@ -255,6 +272,7 @@ if zsystem flock -t 0 "$KDEVM_STATE/lock" 2>/dev/null; then echo free; else echo
 exit 1
 EOF
   chmod +x "$F2/qemu-system-aarch64"
+  printf '#!/bin/sh\necho 48000\n' > "$F2/omarchy-vm-helper"; chmod +x "$F2/omarchy-vm-helper"   # every runtime executable: no fallback to the real builder
   "$QI" create -q -f qcow2 "$T/v11/debian-13-generic-arm64.qcow2" 1M
   printf '%s  debian-13-generic-arm64.qcow2\n' "$(shasum -a 512 "$T/v11/debian-13-generic-arm64.qcow2" | cut -d' ' -f1)" > "$T/v11/SHA512SUMS"
   : > "$T/v11/code.fd"; : > "$T/v11/vars.fd"
@@ -266,6 +284,11 @@ EOF
   [[ -f "$T/v11/factory.qcow2.failed" && ! -e "$T/v11/seed.iso" && ! -e "$T/v11/factory.qcow2.building" ]] && pass "failed build: disk kept as .failed, seed removed" || fail "failed build cleanup"
   # a builder process is a zsh running one of the two scripts, not any command line that mentions them
   pgrep -f '^(/bin/)?zsh .*guest/build\.sh' >/dev/null && fail "a separate guest/build.sh process exists" || pass "no separate builder process was involved"
+  [[ "$(cat "$T/v11/out")" != *"runtime build requested"* && ! -d "$T/scratch/try-omarchy" ]] && pass "factory probe never reached runtime/build.sh (no scratch checkout)" || fail "factory probe reached the runtime builder"
+  # 11b. an incomplete runtime (helper missing) under KDEVM_OFFLINE=1 must fail loudly before any fetch
+  F3="$T/fakert3/current/bin"; mkdir -p "$F3" "$T/v11b"; cp "$F2/qemu-system-aarch64" "$F3/"
+  out=$(KDEVM_STATE="$T/v11b" KDEVM_RUNTIME_ROOT="$T/fakert3" KDEVM_FW_CODE="$T/v11/code.fd" KDEVM_FW_VARS="$T/v11/vars.fd" ./kdevm.sh factory 2>&1); rc=$?
+  [[ $rc -ne 0 && "$out" == *"runtime build requested while KDEVM_OFFLINE=1"* && ! -d "$T/scratch/try-omarchy" ]] && pass "incomplete runtime fixture: builder refused immediately under KDEVM_OFFLINE, nothing fetched" || fail "offline guard (rc=$rc: $out)"
 
   # 12. abnormal death of the lock-owning process during a build: nothing
   #     continues mutating shared state, the lock is free, and a leftover

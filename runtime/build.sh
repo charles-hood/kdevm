@@ -21,6 +21,8 @@ REPO="$(cd "$(dirname "$0")/.." && pwd)"
 KDEVM_TOOL=runtime/build.sh
 source "$REPO/lib/kdevm-common.zsh"
 kdevm_load_env
+# KDEVM_OFFLINE=1 (set by tests/checks.sh) must never reach a fetch or a build.
+[[ "${KDEVM_OFFLINE:-}" == 1 ]] && die "runtime build requested while KDEVM_OFFLINE=1; refusing to fetch or build anything"
 PIN="$(tr -d '[:space:]' < "$REPO/runtime/pin.txt")"
 SCRATCH="${KDEVM_SCRATCH:-${KDEVM_STATE:-$HOME/.cache/kdevm}/build}"
 SRC="$SCRATCH/try-omarchy"

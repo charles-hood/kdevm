@@ -82,6 +82,7 @@ kdevm_factory_build() {   # [--force]
 
   # ---- 1. base image, verified ----------------------------------------------
   if [[ ! -f "$STATE/$IMAGE" ]]; then
+    [[ "${KDEVM_OFFLINE:-}" == 1 ]] && die "base image download requested while KDEVM_OFFLINE=1; refusing network access"
     flog "downloading $IMAGE"
     curl -sSL -o "$STATE/SHA512SUMS" "$IMAGE_URL/SHA512SUMS"
     curl -sSL -o "$STATE/$IMAGE.part" "$IMAGE_URL/$IMAGE"
