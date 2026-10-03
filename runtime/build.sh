@@ -78,8 +78,15 @@ IDENTITY="$SRC/macos/Sources/OmarchyVMHelper/FocusedCommandSuperBridge.swift"
 sed -i '' 's/name == "Try Omarchy"/name == "kdevm"/' "$IDENTITY"
 grep -q 'name == "kdevm"' "$IDENTITY" || { echo "could not rebrand the process name the helper accepts ($IDENTITY)" >&2; exit 1; }
 
-echo "== build QEMU/VirGL runtime (their script, otherwise unchanged)"
-( cd "$SRC" && bash macos/build-qemu-gpu-runtime.sh )
+# Their script prints about a thousand lines (meson probes, compiler warnings
+# in QEMU's and VirGL's own code, one install_name_tool warning per relocated
+# library), none of them a problem and all of them alarming to read. The full
+# output goes to a log; the terminal gets their stage lines only, and the
+# log's tail if the build fails.
+LOG="$SCRATCH/runtime-build.log"
+echo "== build QEMU/VirGL runtime (their script, otherwise unchanged): downloads, then about two minutes; full output in $LOG"
+{ ( cd "$SRC" && bash macos/build-qemu-gpu-runtime.sh ) 2>&1 } > >(tee "$LOG" | awk '/^\[qemu-[a-z-]+\] / && !/\] (Downloading|Using cached) / { print "   " $0; fflush() }') \
+  || { echo "---- last lines of $LOG" >&2; tail -30 "$LOG" >&2; die "the runtime build failed; the full output is in $LOG"; }
 t1=$(date +%s)
 echo "== runtime built in $((t1 - t0)) s"
 
