@@ -1,6 +1,14 @@
 # Changelog
 
-## Unreleased
+## 0.2.2 (2026-10-03)
+
+One change to a default, for Macs with little memory. No new features.
+
+### Upgrading from 0.2.1
+
+Update the checkout, with the VM stopped as for any update. Nothing needs
+rebuilding: the runtime pin and the guest are unchanged, and guest memory
+is set at each `up`. On a Mac with 16 GB or more nothing changes.
 
 ### Changed
 
