@@ -513,6 +513,36 @@ of the eleven were 0.1.0 code that the rubric, written as blanket promises
   launcher (same pid and start time after `exec`), three helpers the same
   way, `down` clean, no record or socket left.
 
+## 0.2.0 review, closure pass two (Codex, commit 47c0a61)
+
+NOT CLEAN from both reviewers. Charles was away from Codex, so the pass was
+started from here: Codex through `codex-companion task` (read-only), and in
+parallel a second reviewer on another model (Claude Opus 5.5) with the same
+prompt. Codex: sixteen of twenty-two met. Opus: seventeen. They overlapped
+on two findings and each found things the other passed.
+
+| item | what was wrong | what changed |
+|---|---|---|
+| R3 (blocker) | `guest/factory.zsh` still stopped its provisioning QEMU by bare pid (`F_QPID`) | the provisioning VM is started with `launch_tracked` and stopped with `stop_tracked`; a VM that cannot be confirmed stopped means no factory is produced |
+| R4 (regression) | `stop_tracked` deleted any record it could not parse, including one made unreadable while its process lived | only an empty record (created, never written) is dropped; anything else unreadable is kept and reported, and `up` refuses to start over it |
+| R8 (regression) | a failed `up` skipped socket cleanup when QEMU could not be stopped | sockets are removed first, then the failure is reported |
+| R19 | checks that need `qemu-img`, `mkisofs` or the firmware failed without them | `need_builder`; the `destroy` fixture no longer needs an overlay |
+| R20 | the overlong-line fixture passed even with the discard logic removed (5,000 bytes split so that the tail was not a message) | 4,097 bytes of filler, so the second read starts exactly at a well-formed message |
+| R22 | the upgrade steps were in the changelog only | README, "Upgrading" |
+| regression (blocker) | the new checks cleaned up with `pkill -f '^sleep 4343$'` | every process a check starts is found by its launcher's pid and ended only after its command line is compared, or through its record |
+| R1 (Opus, demonstrated) | `stop_tracked` removed an empty record; a launcher that wrote and passed its inode check in the milliseconds between that read and the unlink then ran with no record | registration is one atomic step: the launcher writes a private file and hard-links it to the record (`link(2)` fails if the record exists). No record is ever half-written or overwritten; an empty record is only ever a cancelled launch (`cancel_launch`), which a launcher cannot link over, so removing one is safe |
+| R14 (Opus) | a password with DEL or a C1 control was written raw and PyYAML rejected the whole seed; U+2028 was folded | those characters are written as `\uXXXX` escapes, which JSON and YAML read back identically |
+| R20 (Opus, nine seeded defects no check caught) | among them: the receiver returning at end of input; `down` continuing after an unconfirmed stop; `up` starting over a kept record; the PowerDevil policy removed from the template | checks strengthened or added for seven of the nine (0b, 4i, 4k, 7b, 10, 12c, 13h, 13k). Not done: a check that swaps a process's identity between SIGTERM and SIGKILL, and one for the icon's per-process name |
+| R22 (Opus) | README gave "102 to 121 s" for the factory build; the runbook had no 121 | the seven builds since the battery module went in took 111, 102, 121, 106, 135, 107 and 137 s (two on the real state directory, five in throwaway ones); README now says 102 to 137 s over seven builds |
+
+- Verified by a real factory build in a throwaway state directory: the
+  provisioning QEMU registered itself, the build finished, no record and no
+  process were left, and the result booted.
+- The launcher runs `zsh -f`, so a `~/.zshenv` cannot run inside every
+  QEMU and helper launch (Opus, outside the rubric).
+- `ln` puts the link INSIDE the target if the target is a directory; the
+  launcher refuses to link when anything at all is at the record's path.
+
 ## Rules that are easy to forget
 
 - Never let the guest sleep: on this machine type it cannot be woken. Sleep

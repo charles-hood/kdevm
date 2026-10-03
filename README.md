@@ -28,7 +28,7 @@ rasterization and WebGL on `virgl (Apple M4 Pro)`, no GPU-process crashes.
 | | |
 |---|---|
 | Runtime build (QEMU + VirGL + libslirp + helper) | 96 s + 21 s |
-| Factory image build (cloud-init, Plasma, both browsers, the battery module) | about 2 minutes (102 to 121 s), 4.3 GB on disk |
+| Factory image build (cloud-init, Plasma, both browsers, the battery module) | about 2 minutes (102 to 137 s over seven builds), 4.3 GB on disk |
 | Boot to a logged-in desktop | 14 s |
 | Clean power-off | 3 s |
 | Idle QEMU CPU | about 7% of one core (5.4% median) |
@@ -76,6 +76,19 @@ Run `./kdevm.sh preflight` instead of `up` the first time if you want the
 graphics stack checked before Plasma touches it: it stops the display
 manager over ssh, runs `eglinfo` and `kmscube`, prints a verdict that names
 the layer at fault if anything is wrong, and starts the desktop.
+
+## Upgrading
+
+Stop the VM first, with the version that started it: `./kdevm.sh down`, then
+update the checkout. A VM left running across an update may not be
+recognised by the new scripts; they will refuse to touch its disk, and it
+then has to be powered off from inside the guest.
+
+After an update, `./kdevm.sh up` rebuilds the runtime by itself when the
+update needs a new one (about two minutes; macOS may ask for the microphone
+again). The factory image is never rebuilt automatically: run
+`./kdevm.sh rebuild` to get guest-side changes (it replaces the overlay).
+[CHANGELOG.md](CHANGELOG.md) says which releases need which.
 
 ## Verbs
 
@@ -153,10 +166,10 @@ fw_cfg opt/kdevm/*         <-- per-launch hints (scale)                     <-- 
   that holds the lifecycle lock) downloads and verifies the Debian 13 generic
   arm64 cloud image (the generic kernel has virtio-gpu, HDA, 9p; the cloud
   kernel does not), renders `guest/user-data.yaml.tmpl`, boots it headless
-  with a NoCloud seed, waits for cloud-init, runs fifteen checks that fail
-  the build (the kernel modules and options it needs, the battery module,
-  and the two policies that keep the guest from sleeping or acting on the
-  battery), and powers off.
+  with a NoCloud seed, waits for cloud-init, runs sixteen checks that fail
+  the build (the kernel modules and options it needs, the Plasma Wayland
+  session, the battery module, and the two policies that keep the guest
+  from sleeping or acting on the battery), and powers off.
   The factory never runs cloud-init again. The guest files in
   `guest/vendor/` come verbatim from try-omarchy: the clipboard agent, its
   unit and udev rule, a PipeWire quantum drop-in for the emulated HDA, and

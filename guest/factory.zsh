@@ -7,21 +7,28 @@
 #
 # Caller provides (see guest/build.sh for the defaults): REPO STATE RT QEMU
 # QEMU_IMG FW_CODE FW_VARS_TEMPLATE USER_NAME SSH_PORT FACTORY KNOWN_HOSTS,
-# the library (die, take_lock, KDEVM_LOCK_FD) and `trap kdevm_factory_cleanup EXIT`
-# at script scope.
+# the library (die, take_lock, launch_tracked, stop_tracked, KDEVM_LOCK_FD)
+# and `trap kdevm_factory_cleanup EXIT` at script scope.
 
 flog() { echo "== $(date +%H:%M:%S) $*"; }
 
-# Undo everything this build did after it started (F_OWNED=1): kill the
-# provisioning VM, keep a half-built disk as factory.qcow2.failed (owner-only),
+# Undo everything this build did after it started (F_OWNED=1): stop the
+# provisioning VM (through its record, like any other stop), keep a
+# half-built disk as factory.qcow2.failed (owner-only),
 # remove the seed (plaintext password) and the vars copy. Each step is
 # non-fatal so one failing step (an already-exited QEMU) cannot skip the rest.
 # Before the build starts it touches nothing.
-F_QPID=""; F_WORK=""; F_PROV_VARS=""; F_SEED_DIR=""; F_OWNED=0
+F_REC=""; F_PAT=""; F_WORK=""; F_PROV_VARS=""; F_SEED_DIR=""; F_OWNED=0
+# Is the provisioning QEMU that F_REC vouches for alive? (No record, a dead
+# process, another process under that pid, or one that cannot be inspected: no.)
+kdevm_factory_vm_alive() {
+  local PF_PID PF_START
+  [[ -n "$F_REC" ]] && read_pidfile "$F_REC" && [[ "$(pid_state "$PF_PID" "$PF_START" "$F_PAT")" == running ]]
+}
 kdevm_factory_cleanup() {
   set +e
   if [[ $F_OWNED -eq 1 ]]; then
-    [[ -n "$F_QPID" ]] && kill "$F_QPID" 2>/dev/null
+    [[ -n "$F_REC" ]] && stop_tracked "$F_REC" "$F_PAT" "provisioning QEMU" kill
     [[ -n "$F_WORK" && -f "$F_WORK" ]] && mv -f "$F_WORK" "$FACTORY.failed" 2>/dev/null
     rm -f "$F_PROV_VARS" "$STATE/seed.iso" 2>/dev/null
     [[ -n "$F_SEED_DIR" ]] && rm -rf "$F_SEED_DIR"
@@ -105,15 +112,20 @@ kdevm_factory_build() {   # [--force]
   python3 - "$REPO/guest/user-data.yaml.tmpl" "$F_SEED_DIR/user-data" "$REPO/guest" <<'PY'
 import base64, json, os, re, sys
 tmpl, out, guest = sys.argv[1:]
-values = {
-    "USER": os.environ["KDEVM_USER_NAME"],
-    # JSON strings are valid YAML double-quoted scalars: any password survives
-    # (&, |, #, a leading digit, quotes, backslashes).
+def scalar(value):
+    # A JSON string is a valid YAML double-quoted scalar: any password
+    # survives (&, |, #, a leading digit, quotes, backslashes).
     # ensure_ascii=False: raw UTF-8 is valid inside a YAML double-quoted
     # scalar, while JSON's \ud83d\udd11 surrogate pairs are not (PyYAML
     # returns two surrogates for an emoji and the guest cannot encode them).
-    "PASS": json.dumps(os.environ["KDEVM_PASS"], ensure_ascii=False),
-    "SSHKEY": json.dumps(os.environ["KDEVM_SSHKEY"], ensure_ascii=False),
+    # What json.dumps leaves raw but YAML does not accept or does not keep
+    # (DEL, the C1 controls, the Unicode line and paragraph separators) is
+    # written as an escape, which both read back as the same character.
+    return re.sub("[\x7f-\x9f\u2028\u2029]", lambda m: "\\u%04x" % ord(m.group()), json.dumps(value, ensure_ascii=False))
+values = {
+    "USER": os.environ["KDEVM_USER_NAME"],
+    "PASS": scalar(os.environ["KDEVM_PASS"]),
+    "SSHKEY": scalar(os.environ["KDEVM_SSHKEY"]),
 }
 TOKEN = r"@@(B64:[A-Za-z0-9._/-]+|USER|PASS|SSHKEY)@@"
 def expand(match):
@@ -144,7 +156,9 @@ PY
   : > "$F_SERIAL"
   rm -f "$KNOWN_HOSTS"
   flog "booting headless for provisioning (serial: $F_SERIAL)"
-  "$QEMU" \
+  F_REC="$STATE/factory-qemu.pid"; F_PAT="*${QEMU}*file=${F_WORK}*"
+  stop_tracked "$F_REC" "$F_PAT" "provisioning QEMU" kill || die "a provisioning QEMU from an earlier build could not be stopped; see $F_REC"
+  launch_tracked "$F_REC" "$STATE/factory-qemu.out" "$QEMU" \
     -machine virt,accel=hvf,gic-version=3 -cpu host,pmu=off \
     -smp 4,sockets=1,cores=4,threads=1 -m 6144M -nodefaults \
     -drive if=pflash,format=raw,readonly=on,file="$FW_CODE" \
@@ -155,14 +169,17 @@ PY
     -device virtio-blk-pci,drive=seed \
     -netdev user,id=net,hostfwd=tcp:127.0.0.1:$SSH_PORT-:22 -device virtio-net-pci,netdev=net,romfile= \
     -object rng-random,id=rng,filename=/dev/urandom -device virtio-rng-pci,rng=rng \
-    -display none -serial "file:$F_SERIAL" -monitor none {KDEVM_LOCK_FD}<&- &
-  F_QPID=$!
+    -display none -serial "file:$F_SERIAL" -monitor none \
+    || die "$F_REC is in the way; the provisioning VM was not started"
+  for i in {1..50}; do kdevm_factory_vm_alive && break; sleep 0.1; done
+  # Not registered in time: cancel the launch so it cannot start later, behind this build's back.
+  kdevm_factory_vm_alive || cancel_launch "$F_REC" || true
 
   # ---- 5. wait for ssh, then for cloud-init ---------------------------------
   flog "waiting for ssh on localhost:$SSH_PORT"
   for i in {1..120}; do
     ssh "${FSSH[@]}" "$USER_NAME@localhost" true 2>/dev/null && break
-    kill -0 $F_QPID 2>/dev/null || die "QEMU exited during provisioning; see $F_SERIAL"
+    kdevm_factory_vm_alive || die "QEMU exited during provisioning; see $F_SERIAL and $STATE/factory-qemu.out"
     sleep 5
   done
   ssh "${FSSH[@]}" "$USER_NAME@localhost" true || die "ssh never answered; see $F_SERIAL"
@@ -241,9 +258,13 @@ EOF
   # ---- 7. power off, finalize ----------------------------------------------
   flog "powering off"
   ssh "${FSSH[@]}" "$USER_NAME@localhost" 'sudo cloud-init clean --logs; sync; sudo poweroff' 2>/dev/null || true
-  for i in {1..60}; do kill -0 $F_QPID 2>/dev/null || break; sleep 1; done
-  kill -0 $F_QPID 2>/dev/null && { echo "QEMU still up after 60 s; killing" >&2; kill $F_QPID 2>/dev/null || true; sleep 1; }
-  F_QPID=""
+  for i in {1..60}; do kdevm_factory_vm_alive || break; sleep 1; done
+  kdevm_factory_vm_alive && echo "QEMU still up after 60 s; stopping it" >&2
+  # Gone already (the record is dropped) or ended now by verified signals. A
+  # provisioning VM that cannot be confirmed stopped still has the disk open:
+  # no factory is produced from it.
+  stop_tracked "$F_REC" "$F_PAT" "provisioning QEMU" kill || die "the provisioning QEMU could not be confirmed stopped; factory NOT produced (disk kept at $FACTORY.failed)"
+  F_REC=""
   rm -f "$F_PROV_VARS" "$STATE/seed.iso" "$KNOWN_HOSTS"; rm -rf "$F_SEED_DIR"
   mv "$F_WORK" "$FACTORY"; chmod 600 "$FACTORY"   # cleanup finds no F_WORK afterwards
   t2=$(date +%s)

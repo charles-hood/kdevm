@@ -41,9 +41,9 @@ fixes so far:
   items not met, most of them in code unchanged since 0.1.0 that the rubric
   now covers. There is one way to start a process and one way to stop one,
   used for QEMU and for every helper. `launch_tracked`: the record file is
-  opened by `up` and handed to the launcher as a descriptor, so a delayed
-  launcher can never write into a newer session's record, and QEMU too is
-  recorded before it exists. `stop_tracked`: every signal, SIGKILL included,
+  written by the launcher itself and put in place with an atomic hard link
+  (see the next entry), so a delayed launcher can never touch a newer
+  session's record, and QEMU too is recorded before it exists. `stop_tracked`: every signal, SIGKILL included,
   is sent only after the record has been checked against the live process,
   and a record is dropped only once the exit is confirmed; a QEMU that
   cannot be confirmed stopped keeps its record, `down` exits 2, and
@@ -54,7 +54,24 @@ fixes so far:
   drops an overlong line whole instead of reading its tail as a message;
   the seed renderer makes one pass, so a password such as `@@SSHKEY@@` stays
   a password; `ssh` and `nc` are failing stubs for the whole test suite.
-  90 offline checks in all.
+- Second closure pass (commit 47c0a61), by two reviewers on different
+  models: sixteen and seventeen of twenty-two items met. A process now
+  registers with one atomic step: its launcher writes pid and start time to
+  a private file and hard-links it to the record, which the kernel refuses
+  if a record is there. A record is never half-written, never overwritten,
+  and a caller that gives up on a slow launcher cancels it with an empty
+  record the launcher cannot link over (this replaces the first closure
+  pass's descriptor hand-off, which left a few milliseconds in which a
+  process could end up running with no record). The factory build's
+  provisioning VM is started and stopped by the same two functions as
+  everything else (it was still signalled by a bare pid); a record that
+  exists but cannot be read is kept, not deleted; a failed `up` removes its
+  sockets even when QEMU could not be confirmed stopped; a password with
+  DEL, a C1 control or U+2028 no longer breaks the seed; the README has an
+  Upgrading section; checks that need the builder's tools are skipped
+  without them; several checks were strengthened so that removing the
+  behaviour they name makes them fail; and the tests end only processes
+  they started, by pid. 96 offline checks in all.
 
 - Battery mirroring: the Mac's battery appears in the guest as a real
   `BAT0`/`ADP0` (charge, state, time estimates, cycle count), so UPower and

@@ -231,8 +231,10 @@ up() {
   # moved together as a double cursor (seen 2026-10-03). The Cocoa frontend
   # hides the host cursor while the pointer is over the guest view.
   # QEMU and the bridge helpers are started with launch_tracked: each records
-  # its own pid and start time before it exists, through a record file opened
-  # here. Nothing below ever signals a pid that a record does not vouch for.
+  # its own pid and start time, atomically, before it exists. Nothing below
+  # ever signals a pid that a record does not vouch for. The record of an
+  # earlier QEMU (gone: the checks above passed) is cleared first.
+  stop_tracked "$PIDFILE" "$QEMU_PATTERN" QEMU || die "the previous QEMU record could not be cleared (kdevm.sh status); refusing to start"
   : > "$STATE/qemu.out"
   launch_tracked "$PIDFILE" "$STATE/qemu.out" "$QEMU" -name kdevm \
     -machine virt,accel=hvf,gic-version=3 -cpu host,pmu=off \
@@ -259,13 +261,16 @@ up() {
     -device virtserialport,bus=vser.0,nr=7,chardev=bat,name=dev.tryomarchy.battery \
     -fw_cfg "name=opt/kdevm/scale,string=$scale" \
     -qmp "unix:$QMP,server=on,wait=off" -serial "file:$SERIAL" -monitor none \
-    || die "could not create $PIDFILE; QEMU was not started"
+    || die "$PIDFILE is in the way; QEMU was not started"
   # A launcher that could not record itself never became QEMU; one that did
   # is vouched for by the record from here on.
   local pid=""
   for i in {1..50}; do pid=$(qemu_pid); [[ -n "$pid" ]] && break; sleep 0.1; done
   if [[ -z "$pid" ]]; then
-    stop_tracked "$PIDFILE" "$QEMU_PATTERN" QEMU kill || log "the QEMU record could not be cleared (kdevm.sh status)"
+    # Not registered in time. Cancel the launch, so that a launcher that is
+    # merely slow cannot start QEMU after this command has reported failure;
+    # if it registered at this very moment, there is a real QEMU to stop.
+    cancel_launch "$PIDFILE" || stop_tracked "$PIDFILE" "$QEMU_PATTERN" QEMU kill || log "the QEMU record could not be cleared (kdevm.sh status)"
     rm -f "${SOCKETS[@]}"
     cat "$STATE/qemu.out" >&2
     die "QEMU did not start: it could not be recorded with its start time, or it exited at once (see above)"
@@ -284,9 +289,10 @@ up() {
   running || ready=0
   if [[ $ready -ne 1 ]]; then
     log "QEMU did not become ready; stopping it"
-    stop_tracked "$PIDFILE" "$QEMU_PATTERN" QEMU kill || die "QEMU did not become ready and could not be stopped; its record is kept (kdevm.sh status)"
+    local stopped=1; stop_tracked "$PIDFILE" "$QEMU_PATTERN" QEMU kill || stopped=0
     rm -f "${SOCKETS[@]}"
     cat "$STATE/qemu.out" >&2
+    [[ $stopped -eq 1 ]] || die "QEMU did not become ready and could not be confirmed stopped; its record is kept (kdevm.sh status)"
     die "QEMU failed to start (see above)"
   fi
   # Host bridges: their helper, one process per bridge, launched and tracked
@@ -296,7 +302,7 @@ up() {
   local name
   for name in $bridges; do
     launch_tracked "$(bridge_record $name)" "$STATE/bridges.log" "$HELPER" --bridge-native-$name "$pid" "${BRIDGE_SOCK[$name]}" \
-      || log "warning: could not create $(bridge_record $name); the $name bridge helper was not started"
+      || log "warning: $(bridge_record $name) is in the way; the $name bridge helper was not started"
   done
   # up only reports the outcome: give each a moment to register and settle.
   for i in {1..20}; do
@@ -368,7 +374,7 @@ destroy() {
   # overlay open at this moment, is anything removed.
   down || return $?
   refuse_if_stray "remove its disks"
-  rm -f "$WORK" "$EFIVARS" "$KNOWN_HOSTS" "$STATE/qemu.out" "$STATE/bridges.log"
+  rm -f "$WORK" "$EFIVARS" "$KNOWN_HOSTS" "$STATE/qemu.out" "$STATE/factory-qemu.out" "$STATE/bridges.log"
   if [[ "${1:-}" == --all ]]; then
     rm -f "$FACTORY" "$STATE/factory-info.txt" "$STATE"/debian-13-generic-arm64.qcow2 "$STATE/SHA512SUMS"
     log "destroyed: overlay, vars store, factory, base image (runtime kept in $RT)"

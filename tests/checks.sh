@@ -34,6 +34,12 @@ fails=0
 pass() { echo "PASS  $1"; }
 fail() { echo "FAIL  $1"; fails=$((fails + 1)); }
 need_runtime() { [[ -x "${KDEVM_RUNTIME_ROOT:-${XDG_DATA_HOME:-$HOME/.local/share}/kdevm/runtime}/current/bin/kdevm" ]]; }
+# What guest/build.sh checks for before it gets to the behaviour under test:
+# a check that needs the builder is skipped, not failed, when one is missing.
+need_builder() {
+  need_runtime && [[ -x "${QEMU_IMG:-/opt/homebrew/bin/qemu-img}" ]] && command -v mkisofs >/dev/null \
+    && [[ -f "${KDEVM_FW_CODE:-/opt/homebrew/share/qemu/edk2-aarch64-code.fd}" && -f "${KDEVM_FW_VARS:-/opt/homebrew/share/qemu/edk2-arm-vars.fd}" ]]
+}
 
 [[ "$(command -v ssh)" == "$T/netstub/ssh" && "$(command -v nc)" == "$T/netstub/nc" ]] && pass "ssh and nc resolve to failing stubs for the whole suite" || fail "network stubs are not first in PATH"
 
@@ -81,7 +87,10 @@ src, d = sys.argv[1], sys.argv[2]
 msg = lambda zone: json.dumps({"type": "timezone", "zone": zone}).encode() + b"\n"
 open(d + "/port", "wb").write(
     msg("America/New_York") + msg("America/New_York")
-    + b"x" * 5000 + msg("Asia/Tokyo")          # one overlong line: no part of it is a message
+    # One overlong line. The receiver reads at most 4097 bytes at a time, so
+    # the first read returns exactly the x's and the second starts at the
+    # brace: without the discard, that tail is a perfectly valid message.
+    + b"x" * 4097 + msg("Asia/Tokyo")
     + msg("../../etc/passwd") + msg("UTC"))
 ns = {"__name__": "kdevm_timezone_loop"}
 exec(compile(open(src).read(), src, "exec"), ns)
@@ -93,28 +102,30 @@ try:
     ns["main"]()
 except EndOfInput:
     pass
+else:
+    sys.exit("the loop returned at end of input; it must wait for the host to come back")
 calls = open(d + "/calls").read().splitlines()
 assert calls == ["set-timezone America/New_York", "set-timezone UTC"], calls
 PYR
 
 # 1. password generation (review finding 1): no tr|head pipeline, 20 chars, mode 600, reused on a second run
-if need_runtime; then
+if need_builder; then
   mkdir -p "$T/v1"
   KDEVM_STATE="$T/v1/state" KDEVM_PASS_FILE="$T/v1/cfg/password" KDEVM_SSH_PUB=/nonexistent ./guest/build.sh >/dev/null 2>&1
   if [[ -f "$T/v1/cfg/password" && "$(stat -f %Lp "$T/v1/cfg/password")" == 600 && "$(wc -c < "$T/v1/cfg/password" | tr -d ' ')" == 20 ]]; then pass "password generated, 20 chars, mode 600"; else fail "password generation"; fi
   out=$(KDEVM_STATE="$T/v1/state" KDEVM_PASS_FILE="$T/v1/cfg/password" KDEVM_SSH_PUB=/nonexistent ./guest/build.sh 2>&1)
   [[ "$out" != *generated* ]] && pass "existing password reused" || fail "existing password reused"
 else
-  echo "SKIP  password generation (no runtime staged; guest/build.sh checks for it first)"
+  echo "SKIP  password generation (needs the staged runtime, qemu-img, mkisofs and the edk2 firmware: guest/build.sh checks for them first)"
 fi
 
 # 3. factory --force refuses while an overlay exists (finding 3)
-if need_runtime; then
+if need_builder; then
   mkdir -p "$T/v3"; : > "$T/v3/factory.qcow2"; : > "$T/v3/work.qcow2"
   out=$(KDEVM_STATE="$T/v3" KDEVM_PASS_FILE="$T/fx/password" KDEVM_SSH_PUB="$T/fx/key.pub" ./guest/build.sh --force 2>&1); rc=$?
   if [[ $rc -ne 0 && "$out" == *overlay* && ! -e "$T/v3/factory.qcow2.building" ]]; then pass "factory --force refused while an overlay exists"; else fail "factory --force with overlay (rc=$rc)"; fi
 else
-  echo "SKIP  factory --force probe (no runtime staged)"
+  echo "SKIP  factory --force probe (needs the staged runtime, qemu-img, mkisofs and the edk2 firmware)"
 fi
 
 # A bridge helper, as kdevm sees one: the runtime's helper binary running one
@@ -196,9 +207,9 @@ kill $SL4 2>/dev/null; wait $SL4 2>/dev/null
 #     written in one zone is recognised from another (the Mac changes zone
 #     while the VM runs)
 sleep 120 & SL5=$!
-rec=$(TZ=Asia/Tokyo zsh -c "source $REPO/lib/kdevm-common.zsh; proc_start $SL5")
-st=$(TZ=America/New_York zsh -c "source $REPO/lib/kdevm-common.zsh; pid_state $SL5 '$rec' 'sleep*'")
-[[ -n "$rec" && "$st" == running ]] && pass "pid_state: a start time recorded in one time zone is recognised in another" || fail "process identity across time zones (record '$rec' gave '$st')"
+rec=$(TZ=Asia/Tokyo LC_ALL=fr_FR.UTF-8 zsh -c "source $REPO/lib/kdevm-common.zsh; proc_start $SL5")
+st=$(TZ=America/New_York LC_ALL=de_DE.UTF-8 zsh -c "source $REPO/lib/kdevm-common.zsh; pid_state $SL5 '$rec' 'sleep*'")
+[[ -n "$rec" && "$st" == running ]] && pass "pid_state: a start time recorded in one time zone and locale is recognised in another" || fail "process identity across time zones (record '$rec' gave '$st')"
 kill $SL5 2>/dev/null; wait $SL5 2>/dev/null
 
 # 4g. a bridge helper whose start time cannot be inspected during down:
@@ -222,20 +233,23 @@ mkdir -p "$T/v4j"; fake_helper "$T/v4j" timezone; SV4=$FH
 echo "$SV4 $(proc_start $SV4)" > "$T/v4j/bridge-timezone.pid"; kill -STOP $SV4
 out=$(k4 "$T/v4j" down 2>&1); rc=$?
 if kill -0 $SV4 2>/dev/null && [[ -f "$T/v4j/bridge-timezone.pid" && $rc -eq 2 && "$out" == *"did not exit after SIGTERM; tracking preserved"* ]]; then pass "helper that will not end: record kept, down exits 2 and says so"; else fail "unstoppable helper during down (rc=$rc: $out)"; fi
-: > "$T/v4j/work.qcow2"; : > "$T/v4j/efivars.fd"
+: > "$T/v4j/efivars.fd"; : > "$T/v4j/known_hosts"
 out=$(k4 "$T/v4j" destroy 2>&1); rc=$?
-[[ $rc -eq 2 && -e "$T/v4j/work.qcow2" && -e "$T/v4j/efivars.fd" && -f "$T/v4j/bridge-timezone.pid" ]] && pass "destroy stops (exit 2) and removes nothing when down had to keep a record" || fail "destroy after an incomplete down (rc=$rc: $out)"
+[[ $rc -eq 2 && -e "$T/v4j/efivars.fd" && -e "$T/v4j/known_hosts" && -f "$T/v4j/bridge-timezone.pid" ]] && pass "destroy stops (exit 2) and removes nothing when down had to keep a record" || fail "destroy after an incomplete down (rc=$rc: $out)"
 kill -CONT $SV4; sleep 0.5
 out=$(k4 "$T/v4j" down 2>&1); rc=$?
 if ! kill -0 $SV4 2>/dev/null && [[ ! -f "$T/v4j/bridge-timezone.pid" && $rc -eq 0 ]]; then pass "the same helper once it can run: exit confirmed, record removed"; else fail "helper after SIGCONT (rc=$rc)"; kill -9 $SV4 2>/dev/null; fi
 
 # 4k. launch_tracked and stop_tracked, the only way kdevm starts and ends a
-#     process, exercised directly.
+#     process, exercised directly. Every process below is one this block
+#     started: it is found by the pid of its own launcher ($!) and ended only
+#     after its command line has been checked.
 mkdir -p "$T/v4k" "$T/fakebin4"
+end_own() { [[ -n "$1" && "$(proc_cmd $1)" == "$2" ]] && kill $1 2>/dev/null; return 0; } # pid, exact command line
 #  (a) the record exists before the command does, and exec keeps its identity
-launch_tracked "$T/v4k/a.pid" "$T/v4k/a.log" sleep 4141; sleep 0.5
-read_pidfile "$T/v4k/a.pid"; A_PID=$PF_PID
-if [[ "$(proc_cmd $A_PID)" == "sleep 4141" && "$(pid_state $PF_PID "$PF_START" '*sleep 4141')" == running ]]; then pass "launch_tracked: the command runs under the pid and start time its launcher recorded"; else fail "launch_tracked registration (record: $(cat "$T/v4k/a.pid" 2>/dev/null), cmd: $(proc_cmd ${A_PID:-0}))"; fi
+launch_tracked "$T/v4k/a.pid" "$T/v4k/a.log" sleep 4141; A_PID=$!; sleep 0.5
+read_pidfile "$T/v4k/a.pid"
+if [[ "$PF_PID" == "$A_PID" && "$(proc_cmd $A_PID)" == "sleep 4141" && "$(pid_state $PF_PID "$PF_START" '*sleep 4141')" == running ]]; then pass "launch_tracked: the command runs under the pid and start time its launcher recorded"; else fail "launch_tracked registration (record: $(cat "$T/v4k/a.pid" 2>/dev/null), cmd: $(proc_cmd ${A_PID:-0}))"; fi
 #  (b) a launcher delayed until a later launch has replaced the record cannot
 #      overwrite it and does not start its command (the ps stub stalls the
 #      first launcher's start-time lookup)
@@ -245,27 +259,48 @@ cat > "$T/fakebin4/ps" <<'EOF'
 exec /bin/ps "$@"
 EOF
 chmod +x "$T/fakebin4/ps"
-( export PATH="$T/fakebin4:$PATH"; KDEVM_TEST_PS_DELAY=2 launch_tracked "$T/v4k/b.pid" "$T/v4k/b-old.log" sleep 4242 )
-launch_tracked "$T/v4k/b.pid" "$T/v4k/b-new.log" sleep 4343; sleep 0.5
+PATH="$T/fakebin4:$PATH" KDEVM_TEST_PS_DELAY=2 launch_tracked "$T/v4k/b.pid" "$T/v4k/b-old.log" sleep 4242; OLD_PID=$!
+launch_tracked "$T/v4k/b.pid" "$T/v4k/b-new.log" sleep 4343; NEW_PID=$!; sleep 0.5
 newrec=$(cat "$T/v4k/b.pid"); sleep 2.5
-if [[ -n "$newrec" && "$(cat "$T/v4k/b.pid")" == "$newrec" && "$(proc_cmd ${newrec%% *})" == "sleep 4343" && -z "$(pgrep -f '^sleep 4242$')" ]] && grep -q "not started: sleep" "$T/v4k/b-old.log"; then pass "launch_tracked: a delayed launcher cannot overwrite a newer record and does not start its command"; else fail "delayed launcher (record now: $(cat "$T/v4k/b.pid"), was: $newrec, old command running: $(pgrep -f '^sleep 4242$' | tr '\n' ' '))"; pkill -f '^sleep 4242$'; fi
+if [[ "${newrec%% *}" == "$NEW_PID" && "$(cat "$T/v4k/b.pid")" == "$newrec" && "$(proc_cmd $NEW_PID)" == "sleep 4343" && "$(proc_cmd $OLD_PID)" != "sleep 4242" ]] && grep -q "not started: sleep" "$T/v4k/b-old.log"; then pass "launch_tracked: a delayed launcher cannot overwrite a newer record and does not start its command"; else fail "delayed launcher (record now: $(cat "$T/v4k/b.pid"), was: $newrec, old launcher: $(proc_cmd $OLD_PID))"; fi
+end_own "$OLD_PID" "sleep 4242"
 #  (c) no record file, no process
 mkdir "$T/v4k/c.pid"
-launch_tracked "$T/v4k/c.pid" "$T/v4k/c.log" sleep 4444; rc=$?; sleep 0.3
-[[ $rc -eq 1 && -z "$(pgrep -f '^sleep 4444$')" ]] && pass "launch_tracked: a record that cannot be created means nothing is started" || { fail "launch without a record file (rc=$rc)"; pkill -f '^sleep 4444$'; }
+launch_tracked "$T/v4k/c.pid" "$T/v4k/c.log" sleep 4444; rc=$?; C_PID=$!; sleep 0.3
+[[ $rc -eq 1 && "$C_PID" == "$NEW_PID" ]] && pass "launch_tracked: a record that cannot be created means nothing is started" || { fail "launch without a record file (rc=$rc)"; end_own "$C_PID" "sleep 4444"; }
 #  (d) stop_tracked: SIGTERM only, on a process that ignores it: record kept;
 #      with kill: SIGKILL after the identity is checked again, exit confirmed
 printf '#!/bin/sh\ntrap "" TERM\nwhile :; do sleep 1; done\n' > "$T/v4k/deaf"; chmod +x "$T/v4k/deaf"
-launch_tracked "$T/v4k/d.pid" "$T/v4k/d.log" "$T/v4k/deaf" marker-4545; sleep 0.5; read_pidfile "$T/v4k/d.pid"; D_PID=$PF_PID
+launch_tracked "$T/v4k/d.pid" "$T/v4k/d.log" "$T/v4k/deaf" marker-4545; D_PID=$!; sleep 0.5
 out=$(stop_tracked "$T/v4k/d.pid" "*deaf marker-4545" "test process" 2>&1); rc=$?
 if [[ $rc -eq 1 && -f "$T/v4k/d.pid" && "$out" == *"did not exit after SIGTERM; tracking preserved"* ]] && kill -0 $D_PID 2>/dev/null; then pass "stop_tracked: a process that ignores SIGTERM keeps its record"; else fail "stop_tracked without kill (rc=$rc: $out)"; fi
 out=$(stop_tracked "$T/v4k/d.pid" "*deaf marker-4545" "test process" kill 2>&1); rc=$?
-if [[ $rc -eq 0 && ! -e "$T/v4k/d.pid" ]] && ! kill -0 $D_PID 2>/dev/null; then pass "stop_tracked kill: ended by SIGKILL, exit confirmed, record removed"; else fail "stop_tracked with kill (rc=$rc: $out)"; kill -9 $D_PID 2>/dev/null; fi
+if [[ $rc -eq 0 && ! -e "$T/v4k/d.pid" ]] && ! kill -0 $D_PID 2>/dev/null; then pass "stop_tracked kill: ended by SIGKILL, exit confirmed, record removed"; else fail "stop_tracked with kill (rc=$rc: $out)"; fi
 #  (e) a record whose pid is now another process is never signalled, with or without kill
 echo "$A_PID $(proc_start $A_PID)" > "$T/v4k/e.pid"
 out=$(stop_tracked "$T/v4k/e.pid" "*not-the-command" "test process" kill 2>&1); rc=$?
 if [[ $rc -eq 0 && ! -e "$T/v4k/e.pid" ]] && kill -0 $A_PID 2>/dev/null; then pass "stop_tracked: a record that does not match the live process signals nothing, even with kill"; else fail "stop_tracked on a foreign pid (rc=$rc)"; fi
-stop_tracked "$T/v4k/a.pid" '*sleep 4141' "test process" >/dev/null 2>&1; pkill -f '^sleep 4343$'; pkill -f "$T/v4k/deaf" 2>/dev/null
+#  (f) a record that exists but cannot be read might vouch for a live process:
+#      it is kept, nothing is signalled, and the caller is told (an empty one,
+#      which no launcher ever wrote, is simply dropped)
+chmod 000 "$T/v4k/a.pid"
+out=$(stop_tracked "$T/v4k/a.pid" '*sleep 4141' "test process" kill 2>&1); rc=$?
+if [[ $rc -eq 1 && -e "$T/v4k/a.pid" && "$out" == *"cannot be read as a record; kept"* ]] && kill -0 $A_PID 2>/dev/null; then pass "stop_tracked: an unreadable record is kept, its process is not signalled"; else fail "stop_tracked on an unreadable record (rc=$rc: $out)"; fi
+chmod 600 "$T/v4k/a.pid"; : > "$T/v4k/empty.pid"
+stop_tracked "$T/v4k/empty.pid" '*' "test process" >/dev/null 2>&1; rc=$?
+[[ $rc -eq 0 && ! -e "$T/v4k/empty.pid" ]] && pass "stop_tracked: an empty record (never written) is dropped" || fail "stop_tracked on an empty record (rc=$rc)"
+#  (g) a cancelled launch never starts: the caller gave up and put an empty
+#      record in the launcher's way; the slow launcher cannot link over it,
+#      and the empty record is then simply removed
+PATH="$T/fakebin4:$PATH" KDEVM_TEST_PS_DELAY=2 launch_tracked "$T/v4k/g.pid" "$T/v4k/g.log" sleep 4646; G_PID=$!
+cancel_launch "$T/v4k/g.pid"; rc=$?; sleep 3
+if [[ $rc -eq 0 && -e "$T/v4k/g.pid" && ! -s "$T/v4k/g.pid" && "$(proc_cmd $G_PID)" != "sleep 4646" ]] && grep -q "not started: sleep" "$T/v4k/g.log"; then pass "cancel_launch: a launcher that was too slow cannot register over the empty record and starts nothing"; else fail "cancelled launch (rc=$rc record: '$(cat "$T/v4k/g.pid" 2>/dev/null)' launcher: $(proc_cmd $G_PID))"; fi
+end_own "$G_PID" "sleep 4646"
+cancel_launch "$T/v4k/a.pid"; [[ $? -eq 1 ]] && pass "cancel_launch: refuses when a real record is already there" || fail "cancel_launch overwrote a record"
+# end what this block started, through the records it holds or by its own launchers' pids
+stop_tracked "$T/v4k/a.pid" '*sleep 4141' "test process" >/dev/null 2>&1
+stop_tracked "$T/v4k/b.pid" '*sleep 4343' "test process" >/dev/null 2>&1
+end_own "$D_PID" "/bin/sh $T/v4k/deaf marker-4545"
 
 # 4h. status reports an UNKNOWN bridge helper (record kept) in all three QEMU states.
 #     A ps wrapper fails the start-time lookup only for the pid in KDEVM_TEST_UNKNOWN_PID.
@@ -336,12 +371,12 @@ wait $LH2 2>/dev/null
 if [[ -x .venv/bin/python ]] && .venv/bin/python -c 'import yaml' 2>/dev/null; then
   awk "/<<'PY'\$/{f=1; next} f && /^PY\$/{exit} f" guest/factory.zsh > "$T/render.py"
   ok=1
-  for pw in '&secret' '|secret' 'abc #secret' '12345678' 'q"uo\te' "it's" '{a: b}' '- dash' 'tab	here' ' leading space' 'üñî©ødé' '\\backslash' 'a\nb' 'pass🔑word' '@@SSHKEY@@' '@@USER@@ @@PASS@@' '@@B64:files/kdevm-timezone@@' 'a@@b@@c'; do
+  for pw in '&secret' '|secret' 'abc #secret' '12345678' 'q"uo\te' "it's" '{a: b}' '- dash' 'tab	here' ' leading space' 'üñî©ødé' '\\backslash' 'a\nb' 'pass🔑word' '@@SSHKEY@@' '@@USER@@ @@PASS@@' '@@B64:files/kdevm-timezone@@' 'a@@b@@c' $'del\x7fchar' $'c1\xc2\x80char' $'line\xe2\x80\xa8  sep'; do
     KDEVM_USER_NAME=tester KDEVM_PASS="$pw" KDEVM_SSHKEY='ssh-ed25519 AAAATEST comment #with: odd & chars' \
       python3 "$T/render.py" guest/user-data.yaml.tmpl "$T/ud.yaml" guest || { ok=0; continue; }
     KDEVM_PASS="$pw" .venv/bin/python -c 'import yaml,os,sys; d=yaml.safe_load(open(sys.argv[1])); u=d["users"][0]; sys.exit(0 if u["plain_text_passwd"]==os.environ["KDEVM_PASS"] and u["ssh_authorized_keys"][0]=="ssh-ed25519 AAAATEST comment #with: odd & chars" else 1)' "$T/ud.yaml" || { ok=0; echo "      password case failed: ${(q)pw}"; }
   done
-  [[ $ok -eq 1 ]] && pass "18 hostile passwords (incl. non-BMP, and four that look like template tokens) and a hostile key round-trip through YAML" || fail "YAML rendering"
+  [[ $ok -eq 1 ]] && pass "21 hostile passwords (incl. non-BMP, four that look like template tokens, DEL, a C1 control and U+2028) and a hostile key round-trip through YAML" || fail "YAML rendering"
   # 7a. time zone: the rendered seed installs the receiver byte for byte, its
   #     unit and the udev rule that starts it, and the port name is the same
   #     in the launcher, the receiver and the rule
@@ -376,6 +411,11 @@ assert files["/usr/local/bin/omarchy-native-battery-bridge"]["permissions"] == "
 run = [" ".join(c) if isinstance(c, list) else c for c in seed["runcmd"]]
 assert any(f"dkms install try-omarchy-battery/{version} " in c for c in run) and "systemctl enable omarchy-native-battery-bridge.service" in run
 assert {"dkms", "linux-headers-arm64", "powerdevil"} <= set(seed["packages"])
+# the guest cannot sleep, and Plasma's power manager does nothing at a critical level or on idle
+sleep_conf = files["/etc/systemd/sleep.conf.d/kdevm.conf"]["content"]
+assert all(f"{k}=no" in sleep_conf for k in ("AllowSuspend", "AllowHibernation", "AllowSuspendThenHibernate", "AllowHybridSleep"))
+pd = files["/etc/xdg/powerdevilrc"]["content"]
+assert "BatteryCriticalAction=0" in pd and pd.count("TurnOffDisplayWhenIdle=false") == 3 and pd.count("DimDisplayWhenIdle=false") == 3
 # nothing acts on the mirrored battery: UPower's own critical action is turned off, and the factory build checks it took
 assert any("s/^CriticalPowerAction=.*/CriticalPowerAction=Ignore/" in c and "/etc/UPower/UPower.conf" in c for c in run)
 assert "grep -qx 'CriticalPowerAction=Ignore' /etc/UPower/UPower.conf" in open("guest/factory.zsh").read()
@@ -451,7 +491,7 @@ EOF
   : > "$T/v10/code.fd"; : > "$T/v10/vars.fd"
   out=$(KDEVM_STATE="$T/v10" KDEVM_RUNTIME_ROOT="$T/fakert" KDEVM_FW_CODE="$T/v10/code.fd" KDEVM_FW_VARS="$T/v10/vars.fd" KDEVM_SHARE="$T/v10/share" KDEVM_WINDOW=keep KDEVM_ICON= ./kdevm.sh up 2>&1); rc=$?
   left=$(pgrep -f "$FRT/bin/kdevm" || true)
-  if [[ $rc -ne 0 && -z "$left" && ! -e "$T/v10/qemu.pid" && "$out" == *"failed to start"* ]]; then pass "failed readiness: fake QEMU terminated, non-zero exit, no pid file"; else fail "failed readiness (rc=$rc, leftover='$left')"; [[ -n "$left" ]] && kill $left 2>/dev/null; fi
+  if [[ $rc -ne 0 && -z "$left" && ! -e "$T/v10/qemu.pid" && -z "$(ls "$T/v10/run" 2>/dev/null)" && "$out" == *"failed to start"* ]]; then pass "failed readiness: fake QEMU terminated, non-zero exit, no pid file, no socket left"; else fail "failed readiness (rc=$rc, leftover='$left')"; [[ -n "$left" ]] && kill $left 2>/dev/null; fi
   # 10a. Dock icon: the same up built TryOmarchy.icns in the runtime root (where
   #      the patched QEMU looks) from the repo's PNG and left no work files
   ICNS="$T/fakert/TryOmarchy.icns"
@@ -465,7 +505,7 @@ exec /bin/ps "$@"
 EOF
   out=$(PATH="$T/fakebin2:$PATH" KDEVM_STATE="$T/v10" KDEVM_RUNTIME_ROOT="$T/fakert" KDEVM_FW_CODE="$T/v10/code.fd" KDEVM_FW_VARS="$T/v10/vars.fd" KDEVM_SHARE="$T/v10/share" KDEVM_WINDOW=keep ./kdevm.sh up 2>&1); rc=$?
   left=$(pgrep -f "$FRT/bin/kdevm" || true)
-  if [[ $rc -ne 0 && -z "$left" && ! -e "$T/v10/qemu.pid" && "$out" == *"start time"* ]]; then pass "launch-time start capture failure: child terminated, no pid file"; else fail "start capture failure (rc=$rc, leftover='$left')"; [[ -n "$left" ]] && kill $left 2>/dev/null; fi
+  if [[ $rc -ne 0 && -z "$left" && ! -s "$T/v10/qemu.pid" && -z "$(ls "$T/v10/run" 2>/dev/null)" && "$out" == *"start time"* ]]; then pass "start time unreadable at launch: QEMU is never started, no record vouches for anything (the launch is cancelled), no socket left"; else fail "start capture failure (rc=$rc, leftover='$left')"; [[ -n "$left" ]] && kill $left 2>/dev/null; fi
   # 10c. an unusable KDEVM_ICON is a warning, not a stop: up goes on to launch
   #      QEMU (it reaches the start-time failure above) and the icns in place
   #      is untouched
@@ -581,14 +621,14 @@ if [[ -x "$QI" && -x "$QIO" ]]; then
   stray_ok=1
   for st in "$T/v12c" "$T/v12c/." "$T/v12c-alias"; do
     for record in none old; do
-      for verb in down destroy "destroy --all" rebuild; do
+      for verb in up down destroy "destroy --all" rebuild; do
         [[ $record == old ]] && echo "$OLDQ $(TZ=Asia/Tokyo ps -o lstart= -p $OLDQ | awk '{$1=$1; print}')" > "$T/v12c/qemu.pid" || rm -f "$T/v12c/qemu.pid"
         out=$(KDEVM_STATE="$st" KDEVM_RUNTIME_ROOT="$T/fakert4" ./kdevm.sh ${=verb} 2>&1); rc=$?
         if [[ $rc -eq 0 || "$out" != *"is in use or unreadable; refusing to"* || ! -e "$T/v12c/work.qcow2" || ! -e "$T/v12c/efivars.fd" || ! -e "$T/v12c/factory.qcow2" ]] || ! kill -0 $OLDQ 2>/dev/null; then stray_ok=0; echo "      $verb, state as ${st#$T/}, record=$record: rc=$rc $(echo "$out" | tail -1 | cut -c1-160)"; fi
       done
     done
   done
-  [[ $stray_ok -eq 1 ]] && pass "disk held open: down, destroy, destroy --all and rebuild refuse under the plain path, a '/.' spelling and a symlink, with no record and with a 0.1-style record; disks kept, holder untouched" || fail "open-disk guard on destructive verbs"
+  [[ $stray_ok -eq 1 ]] && pass "disk held open: up, down, destroy, destroy --all and rebuild refuse under the plain path, a '/.' spelling and a symlink, with no record and with a 0.1-style record; disks kept, holder untouched" || fail "open-disk guard on destructive verbs"
   kill $OLDQ 2>/dev/null; wait $OLDQ 2>/dev/null
   # a process that merely mentions the overlay (a log viewer) is not a holder: the same verbs go ahead
   rm -f "$T/v12c/qemu.pid"; ARGV0="less -p file=$T/v12c/work.qcow2 some.log" zsh -c 'sleep 120; :' & MENT=$!; sleep 0.3
@@ -645,7 +685,7 @@ while True:
     cmd = json.loads(line)["execute"] if line else ""
     f.write(json.dumps({"return": {"status": "running", "running": True} if cmd == "query-status" else {}}) + "\n"); f.flush()
     c.close()
-    if cmd == "system_powerdown": sys.exit(0)
+    if cmd == "system_powerdown" and not os.environ.get("KDEVM_FAKE_QEMU_IGNORE_POWERDOWN"): sys.exit(0)
 EOF
   cat > "$F5/omarchy-vm-helper" <<'EOF'
 #!/bin/sh
@@ -698,16 +738,16 @@ EOF
   [[ -S "$T/v13/run/qmp.sock" ]] || fail "fixture: the killed fake QEMU left no socket to clean"
   out=$(k13 down); rc=$?
   if [[ $rc -eq 0 && "$out" == *"not running"* && -z "$(ls "$T/v13/run")" && -z "$(helpers13)" && ! -e "$T/v13/qemu.pid" && -z "$(ls "$T/v13" | grep '^bridge-.*pid')" ]]; then pass "down after QEMU was killed: leftover sockets removed, helpers stopped, records dropped"; else fail "down after a QEMU crash (rc=$rc run: $(ls "$T/v13/run" | tr '\n' ' ') helpers: '$(helpers13)')"; fi
-  # 13h. a helper that cannot register itself never starts: the record's path
-  #      is unwritable (a directory) for one bridge. No process for it, no
-  #      signal sent to anything, a warning, and the desktop still starts
-  mkdir "$T/v13/bridge-battery.pid"; : > "$T/v13/helpers.log"
-  out=$(k13 up); rc=$?; FQ13=$(cut -d' ' -f1 "$T/v13/qemu.pid" 2>/dev/null); sleep 0.5; st=$(k13 status)
-  if [[ $rc -eq 0 && "$out" == *"warning: the battery bridge helper is not running"* && -z "$(pgrep -f -- "--bridge-native-battery .* $T/v13/run/battery.sock")" && "$st" == *"-- bridge battery: NOT RUNNING"* && "$st" == *"-- bridge clipboard: helper pid "* && "$(logged13 battery)" == 0 && "$out" == *"warning: could not create $T/v13/bridge-battery.pid"* ]]; then pass "a helper whose record cannot be created is never started; up warns, the other bridges run"; else fail "unregistrable helper (rc=$rc: $(echo "$st" | grep bridge | tr '\n' ';') log: $(tail -1 "$T/v13/bridges.log"))"; fi
-  out=$(k13 down); rc=$?; rmdir "$T/v13/bridge-battery.pid" 2>/dev/null; [[ $rc -eq 0 && -z "$(helpers13)" ]] || fail "down after an unregistrable helper (rc=$rc)"
-  # 13i. the same when a helper's start time cannot be read at launch: the
-  #      launcher gives up before the helper exists, so there is nothing to
-  #      stop and nothing is signalled by pid
+  # 13h. something that is not a record sits where a bridge record goes (a
+  #      directory): up will not start over what it cannot read. Nothing is
+  #      launched, nothing else in the state changes.
+  mkdir "$T/v13/bridge-battery.pid"; rm -f "$T/v13/fakeqemu.argv"
+  out=$(k13 up); rc=$?
+  if [[ $rc -ne 0 && "$out" == *"cannot be read as a record; kept"* && "$out" == *"refusing to start"* && ! -e "$T/v13/fakeqemu.argv" && ! -e "$T/v13/qemu.pid" && -z "$(helpers13)" && -d "$T/v13/bridge-battery.pid" ]]; then pass "an unreadable bridge record: up refuses before launching anything"; else fail "up over an unreadable record (rc=$rc: $(echo "$out" | tail -2 | tr '\n' ' '))"; fi
+  rmdir "$T/v13/bridge-battery.pid"
+  # 13i. a helper's start time cannot be read at launch: the launcher gives
+  #      up before the helper exists, so there is nothing to stop and nothing
+  #      is signalled by pid
   cat > "$T/fakebin3/ps" <<'EOF'
 #!/bin/sh
 # fail the start-time lookup only for a bridge launcher (its command line names itself)
@@ -720,6 +760,31 @@ EOF
   out=$(PATH="$T/fakebin3:$PATH" k13 up); rc=$?; sleep 0.5
   if [[ $rc -eq 0 && -z "$(helpers13)" && "$(wc -l < "$T/v13/helpers.log" | tr -d ' ')" == 0 && -z "$(cat "$T/v13"/bridge-*.pid 2>/dev/null)" && "$out" == *"warning: the clipboard bridge helper is not running"* ]] && grep -q "could not record this process and its start time" "$T/v13/bridges.log" && kill -0 "$(cut -d' ' -f1 "$T/v13/qemu.pid")" 2>/dev/null; then pass "start time unreadable at launch: no helper is started, none is recorded, QEMU runs on"; else fail "launch without a start time (rc=$rc helpers='$(helpers13)' records: $(ls "$T/v13" | grep bridge | tr '\n' ' '))"; fi
   out=$(k13 down); rc=$?; [[ $rc -eq 0 ]] || fail "down after a launch without start times (rc=$rc)"
+  # 13k. QEMU cannot be confirmed stopped (it ignores the power-down, and
+  #      part-way through down its start time stops being readable): down
+  #      keeps the record, the sockets and the helpers and exits 2; destroy
+  #      then stops at that point and removes no disk
+  mkdir -p "$T/fakebin5"
+  cat > "$T/fakebin5/ps" <<'EOF'
+#!/bin/sh
+# the first two start-time lookups answer; after that the lookup fails
+for a in "$@"; do if [ "$a" = "lstart=" ]; then
+  n=$(cat "$KDEVM_TEST_PSCOUNT" 2>/dev/null || echo 0); echo $((n + 1)) > "$KDEVM_TEST_PSCOUNT"
+  [ "$n" -ge 2 ] && exit 1
+fi; done
+exec /bin/ps "$@"
+EOF
+  chmod +x "$T/fakebin5/ps"
+  out=$(KDEVM_FAKE_QEMU_IGNORE_POWERDOWN=1 k13 up); rc=$?; FQ13=$(cut -d' ' -f1 "$T/v13/qemu.pid" 2>/dev/null); sleep 0.5
+  rec13k=$(cat "$T/v13/qemu.pid"); rm -f "$T/v13/pscount"
+  out=$(PATH="$T/fakebin5:$PATH" KDEVM_TEST_PSCOUNT="$T/v13/pscount" k13 down); rc=$?
+  if [[ $rc -eq 2 && "$out" == *"could not be confirmed stopped"* && "$(cat "$T/v13/qemu.pid" 2>/dev/null)" == "$rec13k" && -S "$T/v13/run/qmp.sock" && "$(echo $(helpers13) | wc -w | tr -d ' ')" == 3 ]] && kill -0 "$FQ13" 2>/dev/null; then pass "down that cannot confirm QEMU stopped: exit 2; record, sockets and helpers left alone"; else fail "unconfirmed stop (rc=$rc: $(echo "$out" | tail -2 | tr '\n' ' '))"; fi
+  rm -f "$T/v13/pscount"
+  out=$(PATH="$T/fakebin5:$PATH" KDEVM_TEST_PSCOUNT="$T/v13/pscount" k13 destroy); rc=$?
+  if [[ $rc -eq 2 && -e "$T/v13/work.qcow2" && -e "$T/v13/efivars.fd" && "$(cat "$T/v13/qemu.pid" 2>/dev/null)" == "$rec13k" ]] && kill -0 "$FQ13" 2>/dev/null; then pass "destroy after such a down: exit 2, no disk removed"; else fail "destroy after an unconfirmed stop (rc=$rc: $(echo "$out" | tail -1))"; fi
+  # end this fixture's QEMU through its record (it ignores the power-down), then the rest
+  stop_tracked "$T/v13/qemu.pid" "*$F5/kdevm*" "fixture QEMU" kill >/dev/null 2>&1
+  out=$(k13 down); rc=$?; [[ $rc -eq 0 && -z "$(helpers13)" ]] || fail "cleanup after the unconfirmed-stop fixture (rc=$rc)"
   # 13g. a helper that exits at once does not stop the desktop: up succeeds, status reports that bridge NOT RUNNING
   out=$(KDEVM_FAKE_HELPER_FAIL=battery k13 up); rc=$?; sleep 1; st=$(k13 status)
   if [[ $rc -eq 0 && "$st" == *"-- bridge battery: NOT RUNNING"* && "$st" == *"-- bridge clipboard: helper pid "* && "$st" == *"-- bridge timezone: helper pid "* ]]; then pass "a helper that exits at once: up still succeeds, status reports that bridge NOT RUNNING"; else fail "helper failing at start (rc=$rc: $(echo "$st" | grep bridge | tr '\n' ';'))"; fi

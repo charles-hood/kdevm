@@ -63,32 +63,42 @@ pid_state() {
 # launch_tracked RECORD LOG COMMAND...: start COMMAND in the background as a
 # process that has registered itself in RECORD before it exists.
 #
-# The record file is created HERE, by the caller (which holds the lifecycle
-# lock), and handed to a small launcher as an open descriptor. The launcher
-# writes its own pid and start time through that descriptor and then execs
-# COMMAND, which keeps both. Consequences:
-#   - no COMMAND ever runs without a record, whatever happens to the caller;
-#   - if the start time cannot be read or written, COMMAND is never started,
-#     so there is never an unrecorded process to clean up by pid;
-#   - a launcher that is delayed until a later launch has replaced RECORD
-#     writes into its own, now unlinked, file and cannot touch the new one;
-#     it then sees that RECORD is no longer its file and does not exec.
-# The launcher's stdout and stderr, and COMMAND's, are appended to LOG.
-# Returns 1, with nothing started, if RECORD cannot be created.
+# A small launcher writes its own pid and start time to a private file and
+# then hard-links that file to RECORD. link(2) is atomic and fails if RECORD
+# exists, so registering is one step that either happened or did not; only
+# then does the launcher exec COMMAND, which keeps the pid and start time.
+# Consequences:
+#   - no COMMAND ever runs without a complete record, whatever happens to
+#     the caller, and a record never exists half-written;
+#   - if the start time cannot be read or RECORD cannot be created, COMMAND
+#     is never started, so there is never an unrecorded process to clean up;
+#   - a launcher never writes into an existing RECORD: one that is delayed
+#     until another process holds the record (or until its caller has put an
+#     empty file there, see below) fails to link and exits.
+# RECORD must not exist: the caller clears an old one first (stop_tracked),
+# and launch_tracked returns 1 without starting anything if it is still
+# there. The launcher's stdout and stderr, and COMMAND's, are appended to LOG.
+#
+# An EMPTY record is a cancelled launch: a caller that gives up waiting for
+# a launcher creates one (cancel_launch), which makes that launcher's link
+# fail. Because launchers never write into an existing file, an empty record
+# can never become a real one, and stop_tracked may simply remove it.
 launch_tracked() { # record, log, command...
-  local rec=$1 logf=$2 rfd; shift 2
-  rm -f "$rec" 2>/dev/null || true
-  # A new file every time (creat,excl), opened here: no record file, no process.
-  sysopen -w -o creat,excl -u rfd -- "$rec" 2>/dev/null || return 1
-  zsh -c 'lib=$1 rec=$2 lockfd=$3; shift 3
-          [[ -n "$lockfd" ]] && exec {lockfd}>&-
-          source "$lib" && zmodload -F zsh/stat b:zstat && start=$(proc_start $$) && [[ -n "$start" ]] \
-            && print -r -- "$$ $start" >&3 && [[ "$(zstat +inode -f 3)" == "$(zstat +inode -- "$rec" 2>/dev/null)" ]] \
-            && exec 3>&- && exec "$@"
-          print -u2 -r -- "kdevm: could not record this process and its start time in $rec; not started: $1"; exit 1' \
-    kdevm-launch "$KDEVM_LIB" "$rec" "${KDEVM_LOCK_FD:-}" "$@" </dev/null >>"$logf" 2>&1 3>&$rfd {rfd}>&- &
-  exec {rfd}>&-
+  local rec=$1 logf=$2; shift 2
+  [[ ! -e "$rec" && ! -L "$rec" ]] || return 1
+  zsh -f -c 'lib=$1 rec=$2 lockfd=$3; shift 3
+             [[ -n "$lockfd" ]] && exec {lockfd}>&-
+             tmp="$rec.launch.$$"
+             source "$lib" && start=$(proc_start $$) && [[ -n "$start" ]] && print -r -- "$$ $start" > "$tmp" \
+               && [[ ! -e "$rec" && ! -L "$rec" ]] && ln "$tmp" "$rec" 2>/dev/null && rm -f "$tmp" && exec "$@"
+             rm -f "$tmp"
+             print -u2 -r -- "kdevm: could not record this process and its start time in $rec; not started: $1"; exit 1' \
+    kdevm-launch "$KDEVM_LIB" "$rec" "${KDEVM_LOCK_FD:-}" "$@" </dev/null >>"$logf" 2>&1 &
 }
+# cancel_launch RECORD: the caller has stopped waiting for a launcher. Put an
+# empty record in its way. Returns 1 if a record is already there: the
+# launcher registered after all, and the caller deals with a real process.
+cancel_launch() { local fd; sysopen -w -o creat,excl -u fd -- "$1" 2>/dev/null || return 1; exec {fd}>&-; }
 
 # stop_tracked RECORD PATTERN LABEL [kill]: end the process RECORD vouches for.
 # Every signal is sent only after the record has been checked against the
@@ -97,11 +107,17 @@ launch_tracked() { # record, log, command...
 #   absent  -> nothing to signal;
 #   unknown -> nothing is signalled.
 # The record is removed only once the process is confirmed gone (or was
-# never ours). Returns 1, record kept, if it could not be verified or did
-# not end.
+# never ours). Returns 1, record kept, if it could not be read, could not be
+# verified, or the process did not end.
 stop_tracked() { # record, pattern, label, [kill]
   local rec=$1 pat=$2 label=$3 PF_PID PF_START i
-  read_pidfile "$rec" || { rm -f "$rec" 2>/dev/null || true; return 0; }   # empty or unreadable: nothing was ever registered
+  [[ -e "$rec" ]] || return 0
+  # Empty: a cancelled launch (cancel_launch). No launcher ever writes into
+  # an existing record, so nothing was or will be started under it. Anything
+  # else that cannot be read as a record might vouch for a live process: it
+  # is kept.
+  [[ -s "$rec" ]] || { rm -f "$rec" 2>/dev/null || true; return 0; }
+  read_pidfile "$rec" || { log "$label record $rec cannot be read as a record; kept (look at it, then remove it by hand)"; return 1; }
   case "$(pid_state "$PF_PID" "$PF_START" "$pat")" in
     absent)  rm -f "$rec"; return 0 ;;
     unknown) log "$label pid $PF_PID could not be verified (process inspection failed); not signalled, tracking preserved"; return 1 ;;
