@@ -52,9 +52,14 @@ A sixth pass removed the last delegation: the factory build is a function
 that is `guest/build.sh` directly or `kdevm.sh factory`, `rebuild` and a
 first-run `up`. No inherited "locked" marker exists any more.
 
-`tests/checks.sh` keeps every probe from all six passes runnable offline
-(35 checks, including fake `ps`, fake QMP servers, fake QEMUs, a SIGKILLed
-lock holder, and a SIGKILLed factory build).
+Three further passes made the clipboard supervisor's shutdown and status
+reporting tri-state like QEMU's, made the test suite provably offline
+(`KDEVM_OFFLINE=1` refuses any fetch or build; network commands are
+stubbed in fixtures), and ended with a clean review verdict.
+
+`tests/checks.sh` keeps every probe from all nine passes runnable offline
+(49 checks, including fake `ps`, fake QMP servers, fake QEMUs, a SIGKILLed
+lock holder, a SIGKILLed factory build, and stubbed `nc`/`ssh`).
 
 - Runtime: try-omarchy's patched QEMU 11.1.1 (HVF, Cocoa + VirGL, libslirp,
   SDL duplex audio, virtio-9p) built by their own script from a pinned

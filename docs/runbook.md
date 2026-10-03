@@ -219,6 +219,25 @@ tool (`scratchpad/mouse`, not in the repo) and an evdev counter in the guest:
 The guest cursor was not hidden or customised; the normal QEMU cursor path
 works.
 
+### Passes seven to nine (commits 3ed5901, f723dee, a7dcad6): closure
+
+Seven: `down` stops the clipboard supervisor with the same tri-state rules
+as QEMU (running: signal and remove the record only after a confirmed exit;
+absent: drop the stale record; unknown: signal nothing, keep the record,
+exit 2 so `destroy` and `rebuild` stop), and the offline suite became
+genuinely offline: `KDEVM_OFFLINE=1` makes the runtime builder and the
+base-image download refuse before any network access, the fake runtime
+carries every executable so `ensure_runtime` has no fallback, and scratch
+is redirected into the fixture. Eight: `status` reports the supervisor
+independently of the QEMU state. Nine: the status fixture stubs `nc` and
+`ssh` first in `PATH` so a test can never reach the real VM.
+
+Verdict on `a7dcad6`: **CLEAN FOR v0.1.0**, no findings, no new defects.
+Remaining items are coverage gaps the reviewer rated non-blocking three
+times (duplicate tracked `up`, untracked overlay holder, malformed QMP
+replies, readiness timing, more supervisor shutdown permutations). The
+house rule asks for two consecutive clean passes; this is the first.
+
 ## Rules that are easy to forget
 
 - `gic-version=3` is mandatory under HVF on this QEMU; it rejects GICv2.
