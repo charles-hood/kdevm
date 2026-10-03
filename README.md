@@ -58,7 +58,7 @@ Measured with try-omarchy's `profile-process.py`; method and provenance in
 ## Quick start
 
 ```
-git clone <this repo> ~/Projects/kdevm
+git clone https://github.com/charles-hood/kdevm.git ~/Projects/kdevm
 cd ~/Projects/kdevm
 ./kdevm.sh up
 ```
