@@ -84,7 +84,13 @@ fixes so far:
   stated limits: the factory build's `pgrep` guard can be tripped by a
   process that only names the disk (it fails closed), and a launcher frozen
   for longer than its caller waits could still register in the instant
-  after a later `destroy` has checked the disk. 98 offline checks in all.
+  after a later `destroy` has checked the disk.
+- A last, narrow check of that final diff by the second reviewer found no
+  regressions. Two small things from it are in: the launcher resets
+  `SECONDS` (zsh takes an exported value, which would have tripped the
+  four-second deadline on every launch), and a factory build stops a
+  provisioning VM left by an earlier, killed build before it replaces that
+  VM's disk, not after. The review is closed. 98 offline checks in all.
 
 - Battery mirroring: the Mac's battery appears in the guest as a real
   `BAT0`/`ADP0` (charge, state, time estimates, cycle count), so UPower and

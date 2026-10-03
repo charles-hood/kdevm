@@ -28,7 +28,7 @@ rasterization and WebGL on `virgl (Apple M4 Pro)`, no GPU-process crashes.
 | | |
 |---|---|
 | Runtime build (QEMU + VirGL + libslirp + helper) | 96 s + 21 s |
-| Factory image build (cloud-init, Plasma, both browsers, the battery module) | about 2 minutes (102 to 137 s over seven builds), 4.3 GB on disk |
+| Factory image build (cloud-init, Plasma, both browsers, the battery module) | about 2 minutes (102 to 137 s over nine builds), 4.3 GB on disk |
 | Boot to a logged-in desktop | 14 s |
 | Clean power-off | 3 s |
 | Idle QEMU CPU | about 7% of one core (5.4% median) |

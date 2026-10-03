@@ -91,6 +91,11 @@ kdevm_factory_build() {   # [--force]
   # overlay first; a direct --force must not.
   [[ -f "$STATE/work.qcow2" ]] && die "an overlay ($STATE/work.qcow2) still backs the current factory; use 'kdevm.sh rebuild' (drops it) or 'kdevm.sh destroy' first"
   pgrep -qf "file=$STATE/(factory|work).qcow2" && die "a kdevm VM is running; 'kdevm.sh down' first"
+  # A provisioning VM that an earlier, killed build left behind and that the
+  # guard above did not see is stopped through its record before its disk is
+  # replaced below.
+  F_WORK="$FACTORY.building"; F_REC="$STATE/factory-qemu.pid"; F_PAT="*${(b)QEMU}*file=${(b)F_WORK}*"
+  stop_tracked "$F_REC" "$F_PAT" "provisioning QEMU" kill || die "a provisioning QEMU from an earlier build could not be stopped; see $F_REC"
   F_OWNED=1
   t0=$(date +%s)
 
@@ -107,7 +112,6 @@ kdevm_factory_build() {   # [--force]
   flog "base image $IMAGE (sha512 $IMAGE_SHA...) verified"
 
   # ---- 2. factory disk ------------------------------------------------------
-  F_WORK="$FACTORY.building"
   rm -f "$F_WORK"
   cp "$STATE/$IMAGE" "$F_WORK"
   "$QEMU_IMG" resize -q "$F_WORK" "${DISK_GB}G"
@@ -163,8 +167,6 @@ PY
   : > "$F_SERIAL"
   rm -f "$KNOWN_HOSTS"
   flog "booting headless for provisioning (serial: $F_SERIAL)"
-  F_REC="$STATE/factory-qemu.pid"; F_PAT="*${(b)QEMU}*file=${(b)F_WORK}*"
-  stop_tracked "$F_REC" "$F_PAT" "provisioning QEMU" kill || die "a provisioning QEMU from an earlier build could not be stopped; see $F_REC"
   launch_tracked "$F_REC" "$STATE/factory-qemu.out" "$QEMU" \
     -machine virt,accel=hvf,gic-version=3 -cpu host,pmu=off \
     -smp 4,sockets=1,cores=4,threads=1 -m 6144M -nodefaults \
@@ -270,7 +272,7 @@ EOF
   # Gone already (the record is dropped) or ended now by verified signals. A
   # provisioning VM that cannot be confirmed stopped still has the disk open:
   # no factory is produced from it.
-  stop_tracked "$F_REC" "$F_PAT" "provisioning QEMU" kill || die "the provisioning QEMU could not be confirmed stopped; factory NOT produced (disk kept at $FACTORY.failed)"
+  stop_tracked "$F_REC" "$F_PAT" "provisioning QEMU" kill || die "the provisioning QEMU could not be confirmed stopped; factory NOT produced"
   F_REC=""
   rm -f "$F_PROV_VARS" "$STATE/seed.iso" "$KNOWN_HOSTS"; rm -rf "$F_SEED_DIR"
   mv "$F_WORK" "$FACTORY"; chmod 600 "$FACTORY"   # cleanup finds no F_WORK afterwards

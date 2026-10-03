@@ -569,6 +569,35 @@ scenarios out of scope unless they cost data or signal a foreign process.
 - A zombie (exited, not yet reaped) answers `kill -0` and shows `Z` in
   `ps -o stat=`; `pid_state` calls it absent.
 
+## 0.2.0 review: closed (2026-10-03)
+
+A final check limited to `0c402b5..f16801d` (Opus, read-only, probes in a
+temp directory) answered five questions about that diff and found no
+regressions. It confirmed by probe that `pid_state` gives the right answer
+for an exited process, a live one, a wrong start time and a zombie, inside
+and outside an EXIT trap, and that the quoted patterns match QEMU's and the
+launcher's command lines under paths with spaces and pattern characters.
+Its two nits and one note were applied:
+
+- zsh imports `SECONDS` from the environment even with `-f`; with it
+  exported as 4 or more, every launch would have refused. The launcher sets
+  `SECONDS=0` first. A factory build was run with `SECONDS=100` exported.
+- `kdevm_factory_build` now clears the record of an earlier provisioning VM
+  (stopping it, verified, if it is still there) before it replaces
+  `factory.qcow2.building`, not after.
+- The factory builds on record since the battery module: 111, 102, 121,
+  106, 135, 107, 137, 107 and 111 s.
+
+The whole review, for the next one: two discovery passes and three closure
+passes plus this check, four of them run by two reviewers on different
+models. What it caught that mattered: `destroy` removing a live VM's disk
+after an upgrade, the guest powering off at a critical battery level, and
+(from testing, not review) the guest suspending into a state it cannot
+leave. What it cost: the launcher's process handling was rewritten three
+times. Next time the limits go into the first prompt: scope to what
+changed, bound every item, and say that contrived scenarios are notes
+unless they cost data or signal a foreign process.
+
 ## Rules that are easy to forget
 
 - Stop the VM (`down`) with the version that started it BEFORE updating the

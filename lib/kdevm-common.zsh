@@ -99,7 +99,7 @@ pid_state() {
 launch_tracked() { # record, log, command...
   local rec=$1 logf=$2; shift 2
   [[ ! -e "$rec" && ! -L "$rec" ]] || return 1
-  zsh -f -c 'lib=$1 rec=$2 lockfd=$3; shift 3
+  zsh -f -c 'SECONDS=0; lib=$1 rec=$2 lockfd=$3; shift 3   # SECONDS=0: zsh would otherwise take an exported value
              [[ -n "$lockfd" ]] && exec {lockfd}>&-
              tmp="$rec.launch.$$"
              source "$lib" && start=$(proc_start $$) && [[ -n "$start" ]] && print -r -- "$$ $start" > "$tmp" \
