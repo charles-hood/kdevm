@@ -106,9 +106,9 @@ kdevm_factory_build() {   # [--force]
   python3 - "$REPO/guest/user-data.yaml.tmpl" "$F_SEED_DIR/user-data" \
     "$V/omarchy-native-clipboard-bridge" "$V/omarchy-native-clipboard-bridge.service" \
     "$V/92-omarchy-native-clipboard.rules" "$V/90-try-omarchy-quantum.conf" \
-    "$REPO/guest/files/firefox-policies.json" <<'PY'
+    "$REPO/guest/files/firefox-policies.json" "$REPO/guest/files/kdevm-timezone" <<'PY'
 import base64, json, os, sys
-tmpl, out, agent, unit, udev, quantum, firefox = sys.argv[1:]
+tmpl, out, agent, unit, udev, quantum, firefox, timezone = sys.argv[1:]
 b64 = lambda p: base64.b64encode(open(p, "rb").read()).decode()
 text = open(tmpl, encoding="utf-8").read()
 for k, v in {
@@ -125,6 +125,7 @@ for k, v in {
     "@@B64_CLIPBOARD_UDEV@@": b64(udev),
     "@@B64_PIPEWIRE_QUANTUM@@": b64(quantum),
     "@@B64_FIREFOX_POLICIES@@": b64(firefox),
+    "@@B64_TIMEZONE_AGENT@@": b64(timezone),
 }.items():
     text = text.replace(k, v)
 open(out, "w", encoding="utf-8").write(text)

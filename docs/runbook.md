@@ -265,6 +265,79 @@ on every `up` and there is no cache to go stale.
 - Seen after `up`: the icon in the Dock with the running dot, the same size
   as its neighbours (screen capture, 3840x2160).
 
+## Time zone mirroring (2026-10-03)
+
+The second item of the plan's integration roadmap. The guest's time zone
+follows the Mac's, live, with no guest zone configured anywhere.
+
+How it is wired:
+
+- Host: `up` adds a second port to the virtio-serial bus
+  (`nr=8,name=dev.tryomarchy.timezone`, chardev socket `run/timezone.sock`)
+  and the supervisor runs `omarchy-vm-helper --bridge-native-timezone`
+  beside the clipboard helper. The helper writes one JSON line,
+  `{"type": "timezone", "zone": "America/New_York"}`, every five seconds and
+  reads nothing from the guest.
+- Guest: `/usr/local/sbin/kdevm-timezone` (ours, `guest/files/`; their
+  receiver is tied to Omarchy's menus and provisioning). It validates the
+  name (plain relative path of a file under `/usr/share/zoneinfo`), compares
+  it with `/etc/localtime` and calls `timedatectl set-timezone` when they
+  differ. A udev rule starts it (`SYSTEMD_WANTS` on the port), so the
+  service has no `enable` step and never runs when the port is absent.
+- Policy: the Mac always wins. `KDEVM_TIMEZONE=off` leaves the port out;
+  nothing runs on either side and the guest keeps its own zone.
+
+Measured on a factory built from this commit, in a throwaway state
+directory beside the real one (second VM, ssh on 2223):
+
+| | |
+|---|---|
+| service started by udev | 2.0 s after kernel start |
+| zone applied on a first boot | 2.1 s, before sddm |
+| a Mac zone change with the VM running | applied in about 1 s (the helper restarted under another `TZ`), Plasma's panel clock followed without a restart |
+| a zone set by hand in the guest | put back after 3.6 s |
+| `KDEVM_TIMEZONE=off`, fresh overlay | no port, service inactive, guest stays on `Etc/UTC` |
+| NTP | untouched: `systemd-timesyncd` active and synchronized, RTC in UTC |
+
+What it turned up:
+
+- **Process identity depended on the Mac's time zone.** `ps -o lstart=`
+  prints the start time in the caller's zone, and the pid records compare
+  that string. A VM started in one zone and inspected from another (the
+  exact case this feature exists for) was reported as not running: `status`
+  said so and dropped the supervisor's record, `down` would have done
+  nothing. `proc_start` now pins `TZ=UTC0` and `LC_ALL=C`. A VM that is
+  running across this update has records in the old rendering: power it off
+  from inside the guest once.
+- **The supervisor ran in ksh emulation.** zsh picks its emulation from the
+  first letter of `argv[0]`, and the supervisor's is
+  `kdevm-bridge-supervisor`. Harmless while it ran one command in a loop;
+  with an associative array of helpers, `${(v)hp}` came back empty. The
+  supervisor now starts with `emulate -R zsh`.
+- `hp[$mode]=$!` stores the two characters `$!`: zsh does not expand a bare
+  `$!` on the right of an array-element assignment. `${!}` works.
+- A SIGTERM used to kill the supervisor and orphan its helper, which then
+  ran until QEMU exited. The supervisor now stops its helpers when it is
+  stopped and when QEMU ends.
+- cloud-init's `timezone:` key writes `/etc/timezone` as well as the
+  symlink. Nothing on Debian 13 updates that file afterwards (`timedatectl`
+  does not, tzdata does not own it), so it contradicted `/etc/localtime`
+  after the first change. The key is gone from the template: a fresh
+  factory is on UTC until the Mac's zone arrives, and has no `/etc/timezone`.
+- A guest read on a virtio port returns end-of-file at once while no host
+  process is connected, so the receiver sleeps two seconds and retries
+  instead of exiting.
+- Not measured: this `kdevm.sh` against a factory built before the
+  receiver existed. The port is then never opened in the guest; by QEMU's
+  virtio-serial code the helper's 45 bytes every five seconds stay in the
+  socket buffer and the helper eventually blocks in `write`, which harms
+  nothing. `kdevm.sh rebuild` is the fix either way.
+- A unix socket path is limited to 104 bytes on macOS. A `KDEVM_STATE` deep
+  enough to push `run/clipboard.sock` past that makes QEMU refuse to start
+  ("UNIX socket path is too long"). The helper also refuses a path that
+  `/private` would be stripped from, so the test state directory was a
+  short symlink in `~/.cache`.
+
 ## Rules that are easy to forget
 
 - `gic-version=3` is mandatory under HVF on this QEMU; it rejects GICv2.

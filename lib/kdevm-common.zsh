@@ -21,8 +21,10 @@ kdevm_load_env() {
 
 # ---- process identity ------------------------------------------------------
 # Pid files hold "pid start-time". ps pads lstart with spaces; awk collapses
-# whitespace so saved and live values compare equal.
-proc_start() { ps -o lstart= -p "$1" 2>/dev/null | awk '{$1=$1; print}'; }
+# whitespace so saved and live values compare equal. ps prints lstart in the
+# caller's time zone and locale, so both are pinned: the Mac changing zone
+# while the VM runs (travel) must not turn our QEMU into a stranger.
+proc_start() { LC_ALL=C TZ=UTC0 ps -o lstart= -p "$1" 2>/dev/null | awk '{$1=$1; print}'; }
 proc_cmd() { ps -o command= -p "$1" 2>/dev/null; }
 # read_pidfile FILE: sets PF_PID and PF_START (PF_START may be empty for a
 # malformed record); returns 1 if the file is missing or the pid is not a number.

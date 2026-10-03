@@ -2,6 +2,31 @@
 
 ## Unreleased
 
+- Time zone mirroring (the second roadmap item): the guest's time zone
+  follows the Mac's, live. try-omarchy's helper
+  (`--bridge-native-timezone`) writes the Mac's zone to a second virtio port
+  every five seconds; a small root service in the guest
+  (`guest/files/kdevm-timezone`, started by udev when the port exists)
+  applies it with `timedatectl`. The Mac always wins; `KDEVM_TIMEZONE=off`
+  leaves the port out and the guest keeps its own zone. Needs a factory
+  built from this version: `kdevm.sh rebuild`. The template no longer sets
+  a zone (it was America/New_York): a fresh guest is on UTC for the two
+  seconds before the Mac's zone arrives, and stays there with mirroring off.
+- Process identity no longer depends on the Mac's time zone. `ps` prints a
+  process's start time in the caller's zone, so a VM started in one zone
+  and inspected from another was reported as not running; the lookup is now
+  pinned to UTC and the C locale. Update with the VM stopped: a VM that is
+  running across the update is no longer recognised and has to be powered
+  off from inside the guest.
+- One supervisor now runs every host bridge (clipboard, time zone), restarts
+  a helper that exits, and stops its helpers when it is stopped. Its files
+  are `bridges.pid` and `bridges.log` (an old `clipboard-bridge.log` in the
+  state directory can be deleted), and `status` reports one `bridges` line
+  with each helper's pid. The supervisor had been running in zsh's ksh
+  emulation because its process name starts with "k"; it now selects zsh.
+  Twelve more offline checks (63 in all), nine of them a first end-to-end
+  run of `up`, `status` and `down` against a fake QEMU that answers QMP.
+
 - Dock icon: `kdevm.sh up` builds `TryOmarchy.icns` in the runtime root from
   `assets/kdevm-icon.png` (or the square PNG named by `KDEVM_ICON`), which is
   where the runtime's Cocoa product-identity patch looks for it. The Dock

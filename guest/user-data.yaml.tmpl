@@ -1,14 +1,19 @@
 #cloud-config
 # kdevm factory: Debian 13 (generic arm64 cloud image) + KDE Plasma 6 Wayland,
 # Google Chrome (native arm64) + Firefox ESR, PipeWire, sddm auto-login, the
-# try-omarchy clipboard agent, a 9p mount for the shared Mac folder.
+# try-omarchy clipboard agent, the time zone receiver, a 9p mount for the
+# shared Mac folder.
 # Rendered by guest/build.sh: the double-at tokens are replaced, vendored
 # files are inlined base64. Derived from the author's xrdp container recipe
 # for the same desktop, minus everything xrdp.
 
 hostname: kdevm
 manage_etc_hosts: true
-timezone: America/New_York
+# No timezone: key. The image's zone (UTC) stands until the Mac's arrives
+# over the time zone port, two seconds into the first boot; with
+# KDEVM_TIMEZONE=off the guest keeps whatever is set inside it. cloud-init's
+# timezone module would also write /etc/timezone, which nothing on Debian 13
+# updates afterwards and which then contradicts /etc/localtime.
 
 users:
   - name: @@USER@@
@@ -216,6 +221,27 @@ write_files:
     permissions: "0644"
     encoding: b64
     content: @@B64_PIPEWIRE_QUANTUM@@
+  # ---- time zone: follow the Mac (guest/files/kdevm-timezone) ---------------
+  #      No enable step: udev starts the service when the host attached the
+  #      port (KDEVM_TIMEZONE=mirror), and never when it did not.
+  - path: /usr/local/sbin/kdevm-timezone
+    permissions: "0755"
+    encoding: b64
+    content: @@B64_TIMEZONE_AGENT@@
+  - path: /etc/systemd/system/kdevm-timezone.service
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=Follow the Mac's time zone (kdevm)
+
+      [Service]
+      ExecStart=/usr/local/sbin/kdevm-timezone
+      Restart=on-failure
+      RestartSec=5
+  - path: /etc/udev/rules.d/93-kdevm-timezone.rules
+    permissions: "0644"
+    content: |
+      SUBSYSTEM=="virtio-ports", ATTR{name}=="dev.tryomarchy.timezone", TAG+="systemd", ENV{SYSTEMD_WANTS}+="kdevm-timezone.service"
   # ---- Firefox: same policy file as the container ---------------------------
   - path: /usr/lib/firefox-esr/distribution/policies.json
     permissions: "0644"

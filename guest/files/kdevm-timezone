@@ -1,0 +1,59 @@
+#!/usr/bin/python3 -I
+"""kdevm: keep the guest's time zone equal to the Mac's.
+
+The host bridge (omarchy-vm-helper --bridge-native-timezone, supervised by
+kdevm.sh) writes one JSON line, {"type": "timezone", "zone": "<IANA name>"},
+to this virtio port every five seconds. The zone is applied through
+timedatectl when it differs from the guest's, so Plasma's clock follows.
+The Mac always wins: a zone chosen inside the guest is put back within
+seconds. To pin a zone, start the VM with KDEVM_TIMEZONE=off: no port, and
+udev never starts this service. Only the zone is set; the clock itself stays
+with the RTC and NTP.
+"""
+import json
+import os
+import re
+import subprocess
+import time
+
+PORT = "/dev/virtio-ports/dev.tryomarchy.timezone"
+ZONEINFO = "/usr/share/zoneinfo"
+LOCALTIME = "/etc/localtime"
+
+
+def zone_from(line, zoneinfo=ZONEINFO):
+    """The zone named by one message, or ValueError. Only the plain relative
+    name of a file under zoneinfo gets through."""
+    message = json.loads(line)
+    if not isinstance(message, dict) or set(message) != {"type", "zone"} or message["type"] != "timezone":
+        raise ValueError("not a time zone message")
+    zone = message["zone"]
+    if (not isinstance(zone, str) or not 0 < len(zone) <= 128
+            or not re.fullmatch(r"[A-Za-z0-9_+/-]+", zone)
+            or any(part in ("", ".", "..") for part in zone.split("/"))
+            or not os.path.isfile(os.path.join(zoneinfo, zone))):
+        raise ValueError("not a time zone this guest has")
+    return zone
+
+
+def main():
+    with open(PORT, "rb", buffering=0) as port:
+        while True:
+            line = port.readline(4097)
+            if not line:
+                # A read returns at once while no host bridge is connected.
+                time.sleep(2)
+                continue
+            try:
+                zone = zone_from(line)
+            except ValueError as error:
+                print(f"rejected a message from the host: {error}", flush=True)
+                continue
+            if os.path.realpath(LOCALTIME) == os.path.realpath(os.path.join(ZONEINFO, zone)):
+                continue
+            subprocess.run(["timedatectl", "set-timezone", zone], check=True, timeout=10)
+            print(f"following the Mac: time zone set to {zone}", flush=True)
+
+
+if __name__ == "__main__":
+    main()

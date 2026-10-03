@@ -4,15 +4,16 @@
 in a native Mac window.** QEMU on Apple's Hypervisor.framework, the guest's
 OpenGL replayed on the Apple GPU through VirGL, Plasma Wayland with KWin
 compositing, HiDPI, live window resize, sound out and microphone in, two-way
-clipboard (text and PNG), one shared Mac folder, ssh. No RDP client, no
-greeter, no Linux display driver to install.
+clipboard (text and PNG), the Mac's time zone, one shared Mac folder, ssh.
+No RDP client, no greeter, no Linux display driver to install.
 
 The host runtime is [try-omarchy](https://github.com/omacom/try-omarchy)'s
 patched QEMU 11.1.1 (23 patches: Cocoa dynamic display, VirGL on native
 macOS OpenGL, HVF free-page memory reclaim, HDA audio recovery, precise
 trackpad scroll and pinch, 9p ownership mapping, and more), built by their
 own script from a pinned commit, plus their Swift helper for the clipboard
-bridge. Everything Omarchy-, Arch- and Hyprland-specific is left behind. The
+and time zone bridges. Everything Omarchy-, Arch- and Hyprland-specific is
+left behind. The
 guest is an ordinary Debian cloud image provisioned once by cloud-init into
 a factory image and run from a throwaway qcow2 overlay, so the VM stays
 disposable: factory = image, overlay = container.
@@ -102,6 +103,7 @@ every script):
 | `KDEVM_WINDOW` | auto | first-window size: auto (display minus margins), keep, or `WxH` points |
 | `KDEVM_FULLSCREEN` | off | open full screen |
 | `KDEVM_ICON` | `assets/kdevm-icon.png` | the Dock icon: a square PNG (1024x1024 with transparency is ideal), converted on every `up` |
+| `KDEVM_TIMEZONE` | mirror | mirror: the guest's time zone follows the Mac's, live (the Mac always wins); off: the guest keeps its own (UTC in a fresh factory) |
 | `KDEVM_SHARE` | `~/kdevm-share` | the Mac folder shared with the guest, mounted at `~/Mac` there |
 | `KDEVM_USER` | your login name | the guest user |
 | `KDEVM_PASS_FILE` | `~/.config/kdevm/password` | the guest user's password (generated if missing) |
@@ -125,6 +127,7 @@ every script):
 Mac window (Cocoa, gl=on)  <-- virglrenderer <-- virtio-gpu-gl-pci <-- Mesa virgl <-- KWin Wayland
 Mac speakers / mic         <-- SDL audiodev  <-- intel-hda + hda-micro      <-- PipeWire
 NSPasteboard               <-- omarchy-vm-helper --bridge-native-clipboard <-- virtserialport <-- clipboard agent (wl-clipboard)
+Mac time zone              --> omarchy-vm-helper --bridge-native-timezone  --> virtserialport --> kdevm-timezone (timedatectl)
 $KDEVM_SHARE               <-- virtio-9p (guest_owner patch)               <-- ~/Mac (systemd mount unit)
 localhost:2222             <-- slirp hostfwd                                 <-- sshd
 QMP unix socket            <-- down / status
@@ -146,11 +149,17 @@ fw_cfg opt/kdevm/*         <-- per-launch hints (scale)                     <-- 
   checks that fail the build if a needed module is missing, and powers off.
   The factory never runs cloud-init again. Four guest files come verbatim
   from try-omarchy (`guest/vendor/`): the clipboard agent, its unit and
-  udev rule, and a PipeWire quantum drop-in for the emulated HDA.
+  udev rule, and a PipeWire quantum drop-in for the emulated HDA. The time
+  zone receiver (`guest/files/kdevm-timezone`) is ours: their helper writes
+  the Mac's zone to a virtio port every five seconds, udev starts the
+  receiver when that port exists, and it calls `timedatectl` when the zone
+  differs. A factory built before this feature has no receiver;
+  `kdevm.sh rebuild` adds it.
 - **Lifecycle.** `kdevm.sh up` makes a qcow2 overlay on the factory, copies
   the UEFI variable template to a private file, queries the helper for the
   host audio sample rates, launches QEMU under a private umask, waits for
-  QMP, starts the clipboard bridge beside it, and sizes the window. `down`
+  QMP, starts one supervisor that keeps the helper's bridges running beside
+  it (clipboard, time zone), and sizes the window. `down`
   asks the guest's systemd to power off over ssh (QMP's ACPI button does
   nothing useful under Plasma), QMP second, kill last.
 
@@ -178,7 +187,7 @@ fw_cfg opt/kdevm/*         <-- per-launch hints (scale)                     <-- 
 
 try-omarchy's helper already carries the host half of each of these; adding
 one is wiring, not writing: audio device picker (choose the Mac output from
-Plasma's applet), timezone mirroring, Mac camera (`v4l2loopback`), battery
+Plasma's applet), Mac camera (`v4l2loopback`), battery
 mirroring on laptops, Touch ID for sudo, USB passthrough, bridged
 networking. See the roadmap section of [docs/plan.md](docs/plan.md).
 

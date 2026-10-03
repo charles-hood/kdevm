@@ -32,6 +32,28 @@ for f in kdevm.sh guest/build.sh runtime/build.sh lib/kdevm-common.zsh tests/che
 done
 python3 -c 'compile(open("guest/vendor/omarchy-native-clipboard-bridge").read(), "agent", "exec")' 2>/dev/null && pass "vendored clipboard agent compiles (in memory, no bytecode written)" || fail "vendored clipboard agent compiles"
 python3 -c 'import json; json.load(open("guest/files/firefox-policies.json"))' && pass "firefox policies.json parses" || fail "firefox policies.json parses"
+# 0a. time zone receiver: only the plain name of a zone file the guest has gets
+#     through; everything else a host could send is rejected (run in memory
+#     against a throwaway zoneinfo, no bytecode written)
+mkdir -p "$T/zi/America"; : > "$T/zi/America/New_York"; : > "$T/zi/UTC"
+python3 - guest/files/kdevm-timezone "$T/zi" <<'PYZ' && pass "time zone receiver: 2 real zones accepted, 15 hostile or malformed messages rejected" || fail "time zone receiver validation"
+import json, sys
+ns = {"__name__": "kdevm_timezone"}
+exec(compile(open(sys.argv[1]).read(), sys.argv[1], "exec"), ns)
+zone_from, zi = ns["zone_from"], sys.argv[2]
+msg = lambda zone, **more: json.dumps({"type": "timezone", "zone": zone, **more}).encode() + b"\n"
+for good in ("America/New_York", "UTC"):
+    assert zone_from(msg(good), zi) == good, good
+bad = [msg("../../etc/passwd"), msg("America/../UTC"), msg("/etc/passwd"), msg("Mars/Olympus"),
+       msg("America"), msg(""), msg(123), msg(None), msg("UTC; reboot"), msg("UTC\n"), msg("A" * 129),
+       msg("UTC", extra=1), json.dumps({"type": "clipboard", "zone": "UTC"}).encode(), b"[]\n", b"\xff\xfe not json\n"]
+for line in bad:
+    try:
+        zone_from(line, zi)
+    except ValueError:
+        continue
+    sys.exit(f"accepted: {line!r}")
+PYZ
 
 # 1. password generation (review finding 1): no tr|head pipeline, 20 chars, mode 600, reused on a second run
 if need_runtime; then
@@ -55,7 +77,7 @@ fi
 
 # 4. stale pid files are not trusted (finding 4): a sleeper must survive down/status
 mkdir -p "$T/v4"; sleep 120 & SL=$!
-echo $SL > "$T/v4/qemu.pid"; echo $SL > "$T/v4/clipboard-bridge.pid"
+echo $SL > "$T/v4/qemu.pid"; echo $SL > "$T/v4/bridges.pid"
 KDEVM_STATE="$T/v4" ./kdevm.sh down >/dev/null 2>&1
 KDEVM_STATE="$T/v4" ./kdevm.sh status >/dev/null 2>&1
 if kill -0 $SL 2>/dev/null; then pass "stale pid: unrelated process left alive"; else fail "stale pid: unrelated process was signalled"; fi
@@ -63,13 +85,13 @@ if kill -0 $SL 2>/dev/null; then pass "stale pid: unrelated process left alive";
 kill $SL 2>/dev/null; wait $SL 2>/dev/null
 # 4b. a bridge pid whose process merely mentions kdevm (an editor) must not be signalled
 mkdir -p "$T/v4b"; ARGV0="vim /review/kdevm.sh" zsh -c 'sleep 120; :' & ED=$!; sleep 0.3
-echo "$ED $(ps -o lstart= -p $ED | awk '{$1=$1; print}')" > "$T/v4b/clipboard-bridge.pid"
+echo "$ED $(proc_start $ED)" > "$T/v4b/bridges.pid"
 KDEVM_STATE="$T/v4b" ./kdevm.sh down >/dev/null 2>&1
 if kill -0 $ED 2>/dev/null; then pass "bridge pid: unrelated 'vim kdevm.sh' process left alive"; else fail "bridge pid: unrelated process was signalled"; fi
 kill $ED 2>/dev/null; wait $ED 2>/dev/null
 # 4c. the real supervisor identity IS accepted (same argv[0] shape, same start time)
 mkdir -p "$T/v4c"; ARGV0="kdevm-bridge-supervisor 1" zsh -c 'sleep 120; :' & SV=$!; sleep 0.3
-echo "$SV $(ps -o lstart= -p $SV | awk '{$1=$1; print}')" > "$T/v4c/clipboard-bridge.pid"
+echo "$SV $(proc_start $SV)" > "$T/v4c/bridges.pid"
 KDEVM_STATE="$T/v4c" ./kdevm.sh down >/dev/null 2>&1
 if kill -0 $SV 2>/dev/null; then fail "bridge pid: a genuine supervisor was not signalled"; else pass "bridge pid: genuine supervisor identity accepted and stopped"; fi
 kill $SV 2>/dev/null; wait $SV 2>/dev/null
@@ -83,7 +105,7 @@ kill -0 $SL2 2>/dev/null && pass "pid record without start time: process left al
 kill $SL2 2>/dev/null; wait $SL2 2>/dev/null
 # 4e. inspection failure (ps broken) keeps the record, refuses the verb, signals nothing
 mkdir -p "$T/v4e" "$T/fakebin"; printf '#!/bin/sh\nexit 1\n' > "$T/fakebin/ps"; chmod +x "$T/fakebin/ps"
-sleep 120 & SL3=$!; echo "$SL3 $(ps -o lstart= -p $SL3 | awk '{$1=$1; print}')" > "$T/v4e/qemu.pid"
+sleep 120 & SL3=$!; echo "$SL3 $(proc_start $SL3)" > "$T/v4e/qemu.pid"
 out=$(PATH="$T/fakebin:$PATH" KDEVM_STATE="$T/v4e" ./kdevm.sh down 2>&1); rc=$?
 if [[ $rc -ne 0 && "$out" == *"cannot be inspected"* && -e "$T/v4e/qemu.pid" ]] && kill -0 $SL3 2>/dev/null; then pass "inspection failure: record kept, verb refused, process untouched"; else fail "inspection failure handling (rc=$rc)"; fi
 out=$(PATH="$T/fakebin:$PATH" KDEVM_STATE="$T/v4e" ./kdevm.sh status 2>&1)
@@ -99,7 +121,7 @@ for a in "$@"; do [ "$a" = "lstart=" ] && exit 1; done
 exec /bin/ps "$@"
 EOF
 chmod +x "$T/fakebin2/ps"
-sleep 120 & SL4=$!; echo "$SL4 $(ps -o lstart= -p $SL4 | awk '{$1=$1; print}')" > "$T/v4f/qemu.pid"
+sleep 120 & SL4=$!; echo "$SL4 $(proc_start $SL4)" > "$T/v4f/qemu.pid"
 st=$(PATH="$T/fakebin2:$PATH" zsh -c "source $REPO/lib/kdevm-common.zsh; pid_state $SL4 'x' 'sleep*'")
 [[ "$st" == unknown ]] && pass "pid_state: start-time lookup failure after a matching command is unknown" || fail "pid_state start-time failure gave '$st'"
 cat > "$T/fakebin2/ps" <<'EOF'
@@ -113,19 +135,28 @@ st=$(zsh -c "source $REPO/lib/kdevm-common.zsh; pid_state $SL4 'not-the-start' '
 [[ "$st" == absent ]] && pass "pid_state: same command, different start time is absent (reused pid)" || fail "pid_state different start gave '$st'"
 kill $SL4 2>/dev/null; wait $SL4 2>/dev/null
 
-# 4g. clipboard supervisor whose start time cannot be inspected during down:
+# 4i. process identity does not depend on the caller's time zone: a record
+#     written in one zone is recognised from another (the Mac changes zone
+#     while the VM runs)
+sleep 120 & SL5=$!
+rec=$(TZ=Asia/Tokyo zsh -c "source $REPO/lib/kdevm-common.zsh; proc_start $SL5")
+st=$(TZ=America/New_York zsh -c "source $REPO/lib/kdevm-common.zsh; pid_state $SL5 '$rec' 'sleep*'")
+[[ -n "$rec" && "$st" == running ]] && pass "pid_state: a start time recorded in one time zone is recognised in another" || fail "process identity across time zones (record '$rec' gave '$st')"
+kill $SL5 2>/dev/null; wait $SL5 2>/dev/null
+
+# 4g. bridge supervisor whose start time cannot be inspected during down:
 #     not signalled, record kept, reported (down exits 2), not converted to absent
 mkdir -p "$T/v4g"; ARGV0="kdevm-bridge-supervisor 1" zsh -c 'sleep 120; :' & SV2=$!; sleep 0.3
-echo "$SV2 $(ps -o lstart= -p $SV2 | awk '{$1=$1; print}')" > "$T/v4g/clipboard-bridge.pid"
+echo "$SV2 $(proc_start $SV2)" > "$T/v4g/bridges.pid"
 cat > "$T/fakebin2/ps" <<'EOF'
 #!/bin/sh
 for a in "$@"; do [ "$a" = "lstart=" ] && exit 1; done
 exec /bin/ps "$@"
 EOF
 out=$(PATH="$T/fakebin2:$PATH" KDEVM_STATE="$T/v4g" ./kdevm.sh down 2>&1); rc=$?
-if kill -0 $SV2 2>/dev/null && [[ -f "$T/v4g/clipboard-bridge.pid" && $rc -eq 2 && "$out" == *"could not be verified"* && "$out" == *"tracking preserved"* ]]; then pass "supervisor unknown during down: not signalled, record kept, reported"; else fail "supervisor unknown during down (rc=$rc alive=$(kill -0 $SV2 2>/dev/null && echo yes || echo no) record=$([[ -f "$T/v4g/clipboard-bridge.pid" ]] && echo kept || echo removed))"; fi
+if kill -0 $SV2 2>/dev/null && [[ -f "$T/v4g/bridges.pid" && $rc -eq 2 && "$out" == *"could not be verified"* && "$out" == *"tracking preserved"* ]]; then pass "supervisor unknown during down: not signalled, record kept, reported"; else fail "supervisor unknown during down (rc=$rc alive=$(kill -0 $SV2 2>/dev/null && echo yes || echo no) record=$([[ -f "$T/v4g/bridges.pid" ]] && echo kept || echo removed))"; fi
 out=$(KDEVM_STATE="$T/v4g" ./kdevm.sh down 2>&1); rc=$?
-if ! kill -0 $SV2 2>/dev/null && [[ ! -f "$T/v4g/clipboard-bridge.pid" && $rc -eq 0 ]]; then pass "same supervisor with inspection working again: stopped, exit confirmed, record removed"; else fail "supervisor stop after recovery (rc=$rc)"; kill $SV2 2>/dev/null; fi
+if ! kill -0 $SV2 2>/dev/null && [[ ! -f "$T/v4g/bridges.pid" && $rc -eq 0 ]]; then pass "same supervisor with inspection working again: stopped, exit confirmed, record removed"; else fail "supervisor stop after recovery (rc=$rc)"; kill $SV2 2>/dev/null; fi
 
 # 4h. status reports an UNKNOWN supervisor (record kept) in all three QEMU states.
 #     A ps wrapper fails the start-time lookup only for the pid in KDEVM_TEST_UNKNOWN_PID.
@@ -145,17 +176,17 @@ printf '#!/bin/sh\necho "nc $*" >> "$KDEVM_TEST_NETLOG"; exit 1\n' > "$T/netstub
 printf '#!/bin/sh\necho "ssh $*" >> "$KDEVM_TEST_NETLOG"; exit 255\n' > "$T/netstub/ssh"
 chmod +x "$T/netstub/nc" "$T/netstub/ssh"; export KDEVM_TEST_NETLOG="$T/v4h/netlog"; : > "$KDEVM_TEST_NETLOG"
 ARGV0="kdevm-bridge-supervisor 1" zsh -c 'sleep 120; :' & SV3=$!; sleep 0.3
-echo "$SV3 $(ps -o lstart= -p $SV3 | awk '{$1=$1; print}')" > "$T/v4h/clipboard-bridge.pid"
+echo "$SV3 $(proc_start $SV3)" > "$T/v4h/bridges.pid"
 st_ok=1
 check_status() { # label, expected qemu line fragment
   local out; out=$(PATH="$T/netstub:$T/fakebin2:$PATH" KDEVM_TEST_UNKNOWN_PID="${3:-$SV3}" KDEVM_STATE="$T/v4h" KDEVM_RUNTIME_ROOT="$T/fakert4" ./kdevm.sh status 2>&1)
-  if [[ "$out" == *"clipboard bridge: UNKNOWN"* && "$out" == *"$2"* && -f "$T/v4h/clipboard-bridge.pid" ]] && kill -0 $SV3 2>/dev/null; then pass "status: supervisor UNKNOWN reported and record kept with QEMU $1"; else st_ok=0; fail "status with QEMU $1: $(echo "$out" | grep -E 'qemu:|bridge' | tr '\n' ' ')"; fi
+  if [[ "$out" == *"bridges: UNKNOWN"* && "$out" == *"$2"* && -f "$T/v4h/bridges.pid" ]] && kill -0 $SV3 2>/dev/null; then pass "status: supervisor UNKNOWN reported and record kept with QEMU $1"; else st_ok=0; fail "status with QEMU $1: $(echo "$out" | grep -E 'qemu:|bridge' | tr '\n' ' ')"; fi
 }
 # (a) QEMU absent: no qemu.pid
 check_status absent "qemu: not running"
 # (b) QEMU running: a process whose command line matches the runtime QEMU on this state's overlay
 ARGV0="$T/fakert4/current/bin/qemu-system-aarch64 -drive file=$T/v4h/work.qcow2" zsh -c 'sleep 120; :' & FQ=$!; sleep 0.3
-echo "$FQ $(ps -o lstart= -p $FQ | awk '{$1=$1; print}')" > "$T/v4h/qemu.pid"
+echo "$FQ $(proc_start $FQ)" > "$T/v4h/qemu.pid"
 check_status running "qemu: pid $FQ"
 # (c) QEMU unknown: its own start-time lookup fails too (wrapper fails every lstart)
 printf '#!/bin/sh\nfor a in "$@"; do [ "$a" = "lstart=" ] && exit 1; done\nexec /bin/ps "$@"\n' > "$T/fakebin2/ps"
@@ -207,10 +238,24 @@ if [[ -x .venv/bin/python ]] && .venv/bin/python -c 'import yaml' 2>/dev/null; t
     KDEVM_USER_NAME=tester KDEVM_PASS="$pw" KDEVM_SSHKEY='ssh-ed25519 AAAATEST comment #with: odd & chars' \
       python3 "$T/render.py" guest/user-data.yaml.tmpl "$T/ud.yaml" "$V/omarchy-native-clipboard-bridge" \
       "$V/omarchy-native-clipboard-bridge.service" "$V/92-omarchy-native-clipboard.rules" \
-      "$V/90-try-omarchy-quantum.conf" guest/files/firefox-policies.json || { ok=0; continue; }
+      "$V/90-try-omarchy-quantum.conf" guest/files/firefox-policies.json guest/files/kdevm-timezone || { ok=0; continue; }
     KDEVM_PASS="$pw" .venv/bin/python -c 'import yaml,os,sys; d=yaml.safe_load(open(sys.argv[1])); u=d["users"][0]; sys.exit(0 if u["plain_text_passwd"]==os.environ["KDEVM_PASS"] and u["ssh_authorized_keys"][0]=="ssh-ed25519 AAAATEST comment #with: odd & chars" else 1)' "$T/ud.yaml" || { ok=0; echo "      password case failed: ${(q)pw}"; }
   done
   [[ $ok -eq 1 ]] && pass "14 hostile passwords (incl. non-BMP) and a hostile key round-trip through YAML" || fail "YAML rendering"
+  # 7a. time zone: the rendered seed installs the receiver byte for byte, its
+  #     unit and the udev rule that starts it, and the port name is the same
+  #     in the launcher, the receiver and the rule
+  .venv/bin/python - "$T/ud.yaml" <<'PYT' && pass "time zone: receiver, unit and udev rule rendered; one port name in launcher, receiver and rule" || fail "time zone pieces in the rendered user-data"
+import base64, sys, yaml
+files = {f["path"]: f for f in yaml.safe_load(open(sys.argv[1]))["write_files"]}
+agent, port = files["/usr/local/sbin/kdevm-timezone"], "dev.tryomarchy.timezone"
+source = open("guest/files/kdevm-timezone", "rb").read()
+assert base64.b64decode(agent["content"]) == source and agent["permissions"] == "0755"
+assert "ExecStart=/usr/local/sbin/kdevm-timezone" in files["/etc/systemd/system/kdevm-timezone.service"]["content"]
+rule = files["/etc/udev/rules.d/93-kdevm-timezone.rules"]["content"]
+assert f'ATTR{{name}}=="{port}"' in rule and 'ENV{SYSTEMD_WANTS}+="kdevm-timezone.service"' in rule
+assert f"name={port}" in open("kdevm.sh").read() and f'"/dev/virtio-ports/{port}"'.encode() in source
+PYT
 else
   echo "SKIP  YAML rendering (no .venv with PyYAML; see header)"
 fi
@@ -365,6 +410,83 @@ EOF
   fi
 else
   echo "SKIP  wrapper-driven factory probes (need qemu-img and mkisofs)"
+fi
+
+# 13. host bridges, end to end with fakes: a fake QEMU that binds every chardev
+#     socket and answers QMP (system_powerdown ends it), and a fake helper that
+#     logs each bridge it is asked to run. ssh and nc are the failing stubs of
+#     4h, so down goes through QMP and nothing leaves the fixture.
+QI="${QEMU_IMG:-/opt/homebrew/bin/qemu-img}"
+if [[ -x "$QI" ]]; then
+  F5="$T/fakert5/current/bin"; mkdir -p "$F5" "$T/v13"
+  cat > "$F5/qemu-system-aarch64" <<'EOF'
+#!/usr/bin/env python3
+import json, os, socket, sys
+args = sys.argv[1:]
+open(os.environ["KDEVM_STATE"] + "/fakeqemu.argv", "w").write("\n".join(args) + "\n")
+qmp = [a for a in args if a.startswith("unix:")][0][5:].split(",")[0]
+keep = []
+for a in args:
+    if a.startswith("socket,id="):
+        s = socket.socket(socket.AF_UNIX); s.bind(a.split("path=")[1].split(",")[0]); s.listen(4); keep.append(s)
+srv = socket.socket(socket.AF_UNIX); srv.bind(qmp); srv.listen(4)
+while True:
+    c, _ = srv.accept(); f = c.makefile("rw")
+    f.write(json.dumps({"QMP": {"version": {}, "capabilities": []}}) + "\n"); f.flush()
+    f.readline(); f.write(json.dumps({"return": {}}) + "\n"); f.flush()
+    line = f.readline()
+    cmd = json.loads(line)["execute"] if line else ""
+    f.write(json.dumps({"return": {"status": "running", "running": True} if cmd == "query-status" else {}}) + "\n"); f.flush()
+    c.close()
+    if cmd == "system_powerdown": sys.exit(0)
+EOF
+  cat > "$F5/omarchy-vm-helper" <<'EOF'
+#!/bin/sh
+case "$1" in
+  --host-audio-frequency) echo 48000 ;;
+  --bridge-native-*) echo "$1 $2 $3 $$" >> "$KDEVM_STATE/helpers.log"; trap 'kill $c 2>/dev/null; exit 0' TERM; sleep 300 & c=$!; wait ;;
+esac
+EOF
+  chmod +x "$F5/qemu-system-aarch64" "$F5/omarchy-vm-helper"
+  "$QI" create -q -f qcow2 "$T/v13/factory.qcow2" 1M
+  : > "$T/v13/code.fd"; : > "$T/v13/vars.fd"; export KDEVM_TEST_NETLOG="$T/v13/netlog"; : > "$KDEVM_TEST_NETLOG"
+  k13() { PATH="$T/netstub:$PATH" KDEVM_STATE="$T/v13" KDEVM_RUNTIME_ROOT="$T/fakert5" KDEVM_FW_CODE="$T/v13/code.fd" KDEVM_FW_VARS="$T/v13/vars.fd" KDEVM_SHARE="$T/v13/share" KDEVM_WINDOW=keep ./kdevm.sh "$@" 2>&1; }
+  helpers13() { pgrep -f "$F5/omarchy-vm-helper --bridge-native" | tr '\n' ' '; }
+  logged13() { grep -c -- "^--bridge-native-$1 $FQ13 $T/v13/run/$1.sock " "$T/v13/helpers.log" 2>/dev/null; } # bridge -> starts on its socket for this QEMU
+  # 13a. default (mirror): the port is on the command line and both helpers run on their own sockets
+  out=$(k13 up); rc=$?; FQ13=$(cut -d' ' -f1 "$T/v13/qemu.pid" 2>/dev/null); sleep 1.5
+  argv=$(cat "$T/v13/fakeqemu.argv" 2>/dev/null)
+  if [[ $rc -eq 0 && "$argv" == *"socket,id=tz,path=$T/v13/run/timezone.sock,server=on,wait=off"* && "$argv" == *"chardev=tz,name=dev.tryomarchy.timezone"* && "$(logged13 clipboard)" == 1 && "$(logged13 timezone)" == 1 ]]; then pass "up (mirror): time zone port on the QEMU command line, clipboard and time zone helpers started on their sockets"; else fail "up with time zone mirroring (rc=$rc: $(echo "$out" | tail -2 | tr '\n' ' ') log: $(tr '\n' ';' < "$T/v13/helpers.log" 2>/dev/null))"; fi
+  out=$(k13 status)
+  [[ "$out" =~ '-- bridges: supervisor pid [0-9]+, clipboard helper [0-9]+, time zone helper [0-9]+' ]] && pass "status: one supervisor, both helpers reported by pid" || fail "status bridges line: $(echo "$out" | grep bridges)"
+  # 13b. a helper that dies is started again; the other one is left alone
+  tzp=$(pgrep -f -- "--bridge-native-timezone $FQ13 $T/v13/run/timezone.sock"); kill $tzp 2>/dev/null; sleep 2.5
+  tzp2=$(pgrep -f -- "--bridge-native-timezone $FQ13 $T/v13/run/timezone.sock")
+  [[ -n "$tzp" && -n "$tzp2" && "$tzp2" != "$tzp" && "$(logged13 timezone)" == 2 && "$(logged13 clipboard)" == 1 ]] && pass "supervisor: a dead time zone helper is restarted, the clipboard helper is not disturbed" || fail "helper restart (was '$tzp' now '$tzp2', log: $(tr '\n' ';' < "$T/v13/helpers.log"))"
+  # 13c. down (ssh stubbed out, so QMP): QEMU, supervisor and helpers gone, records and sockets removed
+  SV13=$(cut -d' ' -f1 "$T/v13/bridges.pid" 2>/dev/null)
+  out=$(k13 down); rc=$?; sleep 0.5
+  if [[ $rc -eq 0 && -n "$SV13" && -z "$(helpers13)" && ! -e "$T/v13/qemu.pid" && ! -e "$T/v13/bridges.pid" && ! -e "$T/v13/run/timezone.sock" && ! -e "$T/v13/run/clipboard.sock" ]] && ! kill -0 "$FQ13" 2>/dev/null && ! kill -0 "$SV13" 2>/dev/null; then pass "down: QEMU, supervisor and both helpers gone; pid records and sockets removed"; else fail "down after bridges (rc=$rc helpers='$(helpers13)': $(echo "$out" | tail -2 | tr '\n' ' '))"; fi
+  # 13d. KDEVM_TIMEZONE=off: no port, no time zone helper, status says so
+  : > "$T/v13/helpers.log"
+  out=$(KDEVM_TIMEZONE=off k13 up); rc=$?; FQ13=$(cut -d' ' -f1 "$T/v13/qemu.pid" 2>/dev/null); sleep 1.5
+  argv=$(cat "$T/v13/fakeqemu.argv" 2>/dev/null); st=$(KDEVM_TIMEZONE=off k13 status)
+  if [[ $rc -eq 0 && "$argv" != *timezone* && "$(logged13 clipboard)" == 1 && "$(grep -c timezone "$T/v13/helpers.log")" == 0 && ! -e "$T/v13/run/timezone.sock" && "$st" == *"time zone mirroring off"* ]]; then pass "KDEVM_TIMEZONE=off: no port, no time zone helper, status says mirroring off"; else fail "KDEVM_TIMEZONE=off (rc=$rc argv has timezone: $([[ "$argv" == *timezone* ]] && echo yes || echo no), log: $(tr '\n' ';' < "$T/v13/helpers.log"))"; fi
+  # 13e. SIGTERM to the supervisor while QEMU lives stops its helpers (they are not orphaned)
+  SV13=$(cut -d' ' -f1 "$T/v13/bridges.pid" 2>/dev/null); kill "$SV13" 2>/dev/null; sleep 2
+  if [[ -n "$SV13" && -z "$(helpers13)" ]] && ! kill -0 "$SV13" 2>/dev/null && kill -0 "$FQ13" 2>/dev/null; then pass "supervisor SIGTERM: its helper stopped with it, QEMU untouched"; else fail "supervisor SIGTERM (helpers='$(helpers13)')"; fi
+  out=$(k13 down); rc=$?
+  [[ $rc -eq 0 ]] && ! kill -0 "$FQ13" 2>/dev/null && pass "down with the supervisor already gone: clean exit" || fail "down after supervisor exit (rc=$rc)"
+  # 13f. any other value is refused before anything starts
+  rm -f "$T/v13/fakeqemu.argv"
+  out=$(KDEVM_TIMEZONE=utc k13 up); rc=$?
+  [[ $rc -ne 0 && "$out" == *"KDEVM_TIMEZONE must be mirror or off"* && ! -e "$T/v13/fakeqemu.argv" && ! -e "$T/v13/qemu.pid" ]] && pass "KDEVM_TIMEZONE with another value: refused, nothing launched" || fail "KDEVM_TIMEZONE validation (rc=$rc)"
+  # isolation: every network call in this fixture went to a stub
+  grep -q '^ssh ' "$KDEVM_TEST_NETLOG" && pass "bridge fixture: down's ssh went to the stub, no real service contacted" || fail "bridge fixture network isolation (log: $(tr '\n' ';' < "$KDEVM_TEST_NETLOG"))"
+  unset KDEVM_TEST_NETLOG
+  leftover=$(pgrep -f "$T/fakert5/" | tr '\n' ' '); [[ -n "$leftover" ]] && kill ${=leftover} 2>/dev/null
+else
+  echo "SKIP  host bridge probes (no qemu-img)"
 fi
 
 echo

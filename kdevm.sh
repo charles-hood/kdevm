@@ -2,7 +2,8 @@
 # kdevm: the Debian 13 + KDE Plasma desktop as a GPU-accelerated QEMU VM on
 # this Mac, in a native window. Runtime: try-omarchy's patched QEMU (HVF,
 # Cocoa + VirGL, SLIRP, SDL duplex audio, virtio-9p) and its Swift helper for
-# the clipboard bridge. Guest: our own Debian factory (guest/build.sh).
+# the clipboard and time zone bridges. Guest: our own Debian factory
+# (guest/build.sh).
 #
 #   kdevm.sh runtime     build/stage the QEMU runtime + helper
 #   kdevm.sh factory     build the Debian factory image (~/.cache/kdevm/factory.qcow2)
@@ -19,9 +20,10 @@
 # Config: environment variables, optionally set in ~/.config/kdevm/env
 # (sourced if present). KDEVM_CPUS (4) KDEVM_MEM_MB (8192) KDEVM_SCALE
 # (auto|1|2) KDEVM_SHARE (~/kdevm-share) KDEVM_FULLSCREEN (off) KDEVM_WINDOW
-# (auto|keep|WxH) KDEVM_ICON (assets/kdevm-icon.png) KDEVM_USER (your login
-# name) KDEVM_RUNTIME_ROOT (~/.local/share/kdevm/runtime) KDEVM_STATE
-# (~/.cache/kdevm). Everything large lives outside the repo.
+# (auto|keep|WxH) KDEVM_ICON (assets/kdevm-icon.png) KDEVM_TIMEZONE
+# (mirror|off) KDEVM_USER (your login name) KDEVM_RUNTIME_ROOT
+# (~/.local/share/kdevm/runtime) KDEVM_STATE (~/.cache/kdevm). Everything
+# large lives outside the repo.
 set -euo pipefail
 umask 077   # overlay, vars store, sockets, logs: owner-only from creation
 
@@ -42,6 +44,7 @@ CPUS="${KDEVM_CPUS:-4}"
 MEM_MB="${KDEVM_MEM_MB:-8192}"
 SHARE="${KDEVM_SHARE:-$HOME/kdevm-share}"
 FULLSCREEN="${KDEVM_FULLSCREEN:-off}"
+TIMEZONE="${KDEVM_TIMEZONE:-mirror}"   # mirror: the guest follows the Mac's time zone; off: no port, no bridge
 
 FACTORY="$STATE/factory.qcow2"
 WORK="$STATE/work.qcow2"
@@ -49,9 +52,10 @@ EFIVARS="$STATE/efivars.fd"
 RUN="$STATE/run"                 # mode 0700: the helper refuses sockets in a shared dir
 QMP="$RUN/qmp.sock"
 CLIP="$RUN/clipboard.sock"
+TZSOCK="$RUN/timezone.sock"
 SERIAL="$STATE/serial.log"
 PIDFILE="$STATE/qemu.pid"
-BRIDGEPID="$STATE/clipboard-bridge.pid"
+BRIDGEPID="$STATE/bridges.pid"       # the one supervisor of every host bridge
 KNOWN_HOSTS="$STATE/known_hosts"
 SSH_OPTS=(-p "$SSH_PORT" -o UserKnownHostsFile="$KNOWN_HOSTS" -o StrictHostKeyChecking=no
           -o LogLevel=ERROR -o ConnectTimeout=5)
@@ -76,8 +80,11 @@ bridge_pid() {
   st=$(pid_state "$PF_PID" "$PF_START" "$BRIDGE_PATTERN")
   case $st in running) echo "$PF_PID" ;; absent) rm -f "$BRIDGEPID" ;; esac
 }
+# Pid of the helper running one bridge on this state's socket, else "not-running".
+helper_pid() { pgrep -f -- "--bridge-native-$1 [0-9]+ $2\$" | head -1 || echo not-running; } # bridge, socket
 bridge_state() { local PF_PID PF_START; read_pidfile "$BRIDGEPID" || { echo absent; return 0; }; pid_state "$PF_PID" "$PF_START" "$BRIDGE_PATTERN"; }
-# Stop the clipboard supervisor with the same tri-state rules as QEMU:
+# Stop the bridge supervisor (it stops its helpers) with the same tri-state
+# rules as QEMU:
 # running -> signal, remove the record only after the exit is confirmed;
 # absent  -> remove the stale record;
 # unknown -> signal nothing, keep the record, say so. Returns 1 when the
@@ -91,11 +98,11 @@ stop_bridge() {
       kill "$PF_PID" 2>/dev/null || true
       for i in {1..25}; do kill -0 "$PF_PID" 2>/dev/null || break; sleep 0.2; done
       if kill -0 "$PF_PID" 2>/dev/null; then
-        log "clipboard supervisor pid $PF_PID did not exit after SIGTERM; tracking preserved"; return 1
+        log "bridge supervisor pid $PF_PID did not exit after SIGTERM; tracking preserved"; return 1
       fi
       rm -f "$BRIDGEPID" ;;
     absent)  rm -f "$BRIDGEPID" ;;
-    unknown) log "clipboard supervisor pid $PF_PID could not be verified (process inspection failed); not signalled, tracking preserved"; return 1 ;;
+    unknown) log "bridge supervisor pid $PF_PID could not be verified (process inspection failed); not signalled, tracking preserved"; return 1 ;;
   esac
   return 0
 }
@@ -178,6 +185,7 @@ ensure_factory() { [[ -f "$FACTORY" ]] || { log "factory missing; building (abou
 
 up() {
   ensure_runtime; ensure_factory
+  [[ "$TIMEZONE" == (mirror|off) ]] || die "KDEVM_TIMEZONE must be mirror or off, not '$TIMEZONE'"
   refuse_if_unknown "start"
   if running; then log "already running (pid $(qemu_pid))"; return 0; fi
   install -d -m 700 "$STATE" "$RUN"; chmod 700 "$STATE"; mkdir -p "$SHARE"
@@ -189,17 +197,28 @@ up() {
   # about (pid file lost, identity check failed) must not be started beside.
   local stray; stray=$(pgrep -f -- "file=$WORK" | head -1 || true)
   [[ -n "$stray" ]] && die "a QEMU already runs on $WORK (pid $stray) but is not tracked; stop it (kdevm.sh ssh 'sudo poweroff', or kill $stray) before up"
-  rm -f "$QMP" "$CLIP"
+  rm -f "$QMP" "$CLIP" "$TZSOCK"
   install_icon || log "warning: could not build the Dock icon from ${KDEVM_ICON:-$REPO/assets/kdevm-icon.png}; the Dock icon is unchanged"
   # The helper's bridges accept only a socket owned by this uid with no
   # group/other bits (NativeBridgeSocket.swift); the script-wide umask 077
   # makes QEMU create them that way.
   local out_hz in_hz scale xres yres
+  # Host bridges, as "helper mode, socket" pairs for the supervisor below.
+  # Time zone: a second virtio port the helper writes the Mac's zone to every
+  # five seconds; the guest's kdevm-timezone service (started by udev when
+  # the port exists) applies it. Off: no port, so nothing runs on either side.
+  local -a bridges tzdev
+  bridges=(--bridge-native-clipboard "$CLIP")
+  if [[ "$TIMEZONE" == mirror ]]; then
+    bridges+=(--bridge-native-timezone "$TZSOCK")
+    tzdev=(-chardev "socket,id=tz,path=$TZSOCK,server=on,wait=off"
+           -device virtserialport,bus=vser.0,nr=8,chardev=tz,name=dev.tryomarchy.timezone)
+  fi
   read -r xres yres < <(display_pixels)
   out_hz=$("$HELPER" --host-audio-frequency output 2>/dev/null || echo 48000)
   in_hz=$("$HELPER" --host-audio-frequency input 2>/dev/null || echo 48000)
   scale=$(scale_hint)
-  log "starting: $CPUS vCPU, ${MEM_MB} MB, initial mode ${xres}x${yres}, scale hint $scale, audio ${out_hz}/${in_hz} Hz, share $SHARE"
+  log "starting: $CPUS vCPU, ${MEM_MB} MB, initial mode ${xres}x${yres}, scale hint $scale, audio ${out_hz}/${in_hz} Hz, time zone $TIMEZONE, share $SHARE"
   # gic-version=3 is mandatory on this QEMU under HVF. romfile= on every PCI
   # device: the runtime ships no option ROMs and UEFI boots from disk anyway.
   # show-cursor=off: Plasma draws the guest cursor into the scanout; with
@@ -226,6 +245,7 @@ up() {
     -device virtio-serial-pci,id=vser,romfile= \
     -chardev "socket,id=clip,path=$CLIP,server=on,wait=off" \
     -device virtserialport,bus=vser.0,nr=2,chardev=clip,name=dev.tryomarchy.clipboard \
+    "${tzdev[@]}" \
     -fw_cfg "name=opt/kdevm/scale,string=$scale" \
     -qmp "unix:$QMP,server=on,wait=off" -serial "file:$SERIAL" -monitor none \
     >"$STATE/qemu.out" 2>&1 {KDEVM_LOCK_FD}<&- &
@@ -237,7 +257,7 @@ up() {
     kill $pid 2>/dev/null || true
     for i in {1..25}; do kill -0 $pid 2>/dev/null || break; sleep 0.2; done
     kill -0 $pid 2>/dev/null && { kill -9 $pid 2>/dev/null || true; sleep 0.5; }
-    rm -f "$QMP" "$CLIP"
+    rm -f "$QMP" "$CLIP" "$TZSOCK"
     die "could not record QEMU's start time (process inspection failed); the launched QEMU (pid $pid) was terminated"
   fi
   echo "$pid $start" > "$PIDFILE"
@@ -260,29 +280,43 @@ up() {
       for i in {1..25}; do kill -0 $pid 2>/dev/null || break; sleep 0.2; done
       kill -0 $pid 2>/dev/null && { kill -9 $pid 2>/dev/null || true; sleep 0.5; }
     fi
-    rm -f "$PIDFILE" "$QMP" "$CLIP"
+    rm -f "$PIDFILE" "$QMP" "$CLIP" "$TZSOCK"
     cat "$STATE/qemu.out" >&2
     die "QEMU failed to start (see above)"
   fi
-  # Clipboard bridge: their helper, supervised while QEMU lives (as their
-  # launcher does). The supervisor is its own zsh process with a distinctive
+  # Host bridges: their helper, one process per bridge, supervised while QEMU
+  # lives (as their launcher does). A helper that exits is started again
+  # within a second; SIGTERM to the supervisor stops its helpers, and so does
+  # the end of QEMU. The supervisor is its own zsh process with a distinctive
   # argv[0] (ARGV0) so bridge_pid() can recognise it, with stdio detached so
-  # no inherited pipe stays open until QEMU exits.
+  # no inherited pipe stays open until QEMU exits. Two zsh facts it depends
+  # on: zsh picks an emulation from the first letter of argv[0] and "k" is
+  # ksh, hence emulate; and a bare $! is not expanded on the right of an
+  # array-element assignment, hence ${!}.
   ARGV0="kdevm-bridge-supervisor $pid" zsh -c '
-    helper=$1; qpid=$2; sock=$3; logf=$4
+    emulate -R zsh
+    helper=$1; qpid=$2; logf=$3; shift 3
+    typeset -A hp
+    stop_helpers() { local p; for p in ${(v)hp}; do kill $p 2>/dev/null; done }
+    TRAPTERM() { stop_helpers; exit 0 }
     while kill -0 "$qpid" 2>/dev/null; do
-      "$helper" --bridge-native-clipboard "$qpid" "$sock" >>"$logf" 2>&1 || true
-      kill -0 "$qpid" 2>/dev/null && sleep 1
-    done' kdevm-bridge-supervisor "$HELPER" "$pid" "$CLIP" "$STATE/clipboard-bridge.log" </dev/null >/dev/null 2>&1 {KDEVM_LOCK_FD}<&- &
+      for mode sock in "$@"; do
+        [[ -n "${hp[$mode]:-}" ]] && kill -0 "${hp[$mode]}" 2>/dev/null && continue
+        "$helper" "$mode" "$qpid" "$sock" >>"$logf" 2>&1 &
+        hp[$mode]=${!}
+      done
+      sleep 1
+    done
+    stop_helpers' kdevm-bridge-supervisor "$HELPER" "$pid" "$STATE/bridges.log" "${bridges[@]}" </dev/null >/dev/null 2>&1 {KDEVM_LOCK_FD}<&- &
   local spid=$! sstart
   sstart=$(proc_start $spid) || sstart=""
   if [[ -n "$sstart" ]]; then
     echo "$spid $sstart" > "$BRIDGEPID"
   else
     # An untrackable supervisor is not left behind: stop it; the desktop
-    # keeps running without the clipboard bridge and status says so.
+    # keeps running without its bridges and status says so.
     kill $spid 2>/dev/null || true; rm -f "$BRIDGEPID"
-    log "warning: could not record the clipboard supervisor's start time; bridge stopped (clipboard sharing off this session)"
+    log "warning: could not record the bridge supervisor's start time; bridges stopped (no clipboard sharing or time zone mirroring this session)"
   fi
   # Window size: KScreen restores the guest's last mode and the Cocoa window
   # follows the guest, so the first window can come up small (492x277 points
@@ -328,14 +362,14 @@ down() {
   for i in {1..45}; do kill -0 "$pid" 2>/dev/null || break; sleep 1; done
   if kill -0 "$pid" 2>/dev/null; then log "guest did not power off in 45 s; terminating"; kill "$pid" 2>/dev/null || true; sleep 2; kill -9 "$pid" 2>/dev/null || true; fi
   local brc=0; stop_bridge || brc=$?
-  rm -f "$PIDFILE" "$QMP" "$CLIP"
+  rm -f "$PIDFILE" "$QMP" "$CLIP" "$TZSOCK"
   log "stopped (overlay kept; 'up' resumes it)"
   [[ $brc -eq 0 ]] || return 2
 }
 
 destroy() {
   down
-  rm -f "$WORK" "$EFIVARS" "$KNOWN_HOSTS" "$STATE/qemu.out" "$STATE/clipboard-bridge.log"
+  rm -f "$WORK" "$EFIVARS" "$KNOWN_HOSTS" "$STATE/qemu.out" "$STATE/bridges.log"
   if [[ "${1:-}" == --all ]]; then
     rm -f "$FACTORY" "$STATE/factory-info.txt" "$STATE"/debian-13-generic-arm64.qcow2 "$STATE/SHA512SUMS"
     log "destroyed: overlay, vars store, factory, base image (runtime kept in $RT)"
@@ -394,12 +428,12 @@ status() {
         'echo "-- guest: $(uname -r), seat session $(loginctl show-session $(loginctl list-sessions --no-legend | awk "\$4==\"seat0\"{print \$1; exit}") -p Type --value 2>/dev/null || echo none), uptime $(uptime -p)"' 2>/dev/null || echo "-- guest: ssh not accepting the key yet"
     else echo "-- ssh: localhost:$SSH_PORT not answering"; fi
   else echo "-- qemu: not running"; fi
-  # The clipboard supervisor is reported independently of the QEMU state:
+  # The bridge supervisor is reported independently of the QEMU state:
   # running (no change), unknown (record preserved, nothing signalled),
   # absent (bridge_pid drops the stale record; nothing to report).
   case "$(bridge_state)" in
-    running) echo "-- clipboard bridge: supervisor pid $(bridge_pid), helper $(pgrep -f 'bridge-native-clipboard' | head -1 || echo not-running)" ;;
-    unknown) echo "-- clipboard bridge: UNKNOWN: pid $(head -1 "$BRIDGEPID" | cut -d' ' -f1) could not be inspected; tracking preserved, nothing signalled" ;;
+    running) echo "-- bridges: supervisor pid $(bridge_pid), clipboard helper $(helper_pid clipboard "$CLIP"), time zone $([[ -S "$TZSOCK" ]] && echo "helper $(helper_pid timezone "$TZSOCK")" || echo "mirroring off")" ;;
+    unknown) echo "-- bridges: UNKNOWN: supervisor pid $(head -1 "$BRIDGEPID" | cut -d' ' -f1) could not be inspected; tracking preserved, nothing signalled" ;;
     absent)  bridge_pid >/dev/null ;;
   esac
 }
