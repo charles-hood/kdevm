@@ -459,6 +459,32 @@ was checked here before anything was changed.
 - A battery state can be written to the module by hand for tests: stop the
   agent, then one line to `/sys/devices/platform/try-omarchy-battery/state`.
 
+## 0.2.0 review, discovery pass two (Codex, commit b133a06)
+
+Six blockers and one should-fix against the fixes of pass one. The pattern
+of the answers: stop inferring a fact from process names and pids, and ask
+the kernel object that holds the fact.
+
+| # | finding | disposition |
+|---|---|---|
+| 1 | another spelling of the state path (`/tmp/state/.`, a symlink) slipped past the stray-QEMU guard, which matched text in the process table | the guard is now the disk's own lock: `qemu-img info` fails while another process holds the image for writing. Seen on the real VM: `down` under `~/.cache/kdevm/.` refused with QEMU's "Failed to get shared write lock" |
+| 7 | the same guard took a log viewer naming the overlay for a QEMU | gone with 1: a process that only names the disk holds no lock |
+| 2 | `status` could delete the record a concurrent `up` had just written (`qemu_pid` removed "stale" records) | `qemu_pid` and `status` write nothing; a stale record is dropped by `down` or replaced by `up` |
+| 3 | `up` SIGKILLed between starting a helper and recording it left an untracked helper | the helper registers itself: a launcher zsh writes its own pid and start time to the record, then `exec`s the helper (same pid, same start time). No window, no record means no helper |
+| 4 | when a helper's start time could not be read, `up` sent TERM to a bare pid and assumed it worked | gone with 3: that branch does not exist; the launcher simply does not exec |
+| 6 | a SIGKILLed `runtime/build.sh` released its locks while its compilers ran on | `take_tree_lock`: `flock(2)` on a descriptor the build's children inherit, so the kernel keeps the lock until the last of them ends |
+| 5 | records left by 0.1.0 (`clipboard-bridge.pid`) are ignored even if a process behind them was frozen by hand and still exists | not fixed, proposed out of scope: it needs a helper stopped with SIGSTOP under 0.1.0 before the update, and what it leaves is two idle processes with no disk and no socket. A running 0.1.0 VM is covered by 1 |
+
+- `qemu-io -c "sleep N" image` holds an image exactly as a running QEMU
+  does; the offline checks use it as the lock holder.
+- On macOS `exec` keeps both the pid and `ps -o lstart`, which is what makes
+  self-registration sound.
+- A lock taken with `flock(2)` through an inherited descriptor stays held
+  after the process that took it is SIGKILLed, until every process that
+  inherited the descriptor has ended (checked in a scratch directory before
+  it went into the builder). `zsystem flock` is `fcntl`, which belongs to
+  one process: right for the lifecycle lock, wrong for a build.
+
 ## Rules that are easy to forget
 
 - Never let the guest sleep: on this machine type it cannot be woken. Sleep

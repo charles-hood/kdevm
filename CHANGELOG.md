@@ -5,18 +5,23 @@
 First review pass on the work below (Codex, discovery, commit 5763b80); the
 fixes so far:
 
-- `down`, `destroy` and `rebuild` refuse when a QEMU has the overlay open
-  but the pid record does not vouch for it. Before, such a VM counted as
-  "not running", and `destroy` or `rebuild` then removed the overlay and the
-  UEFI variables from under it. Updating from 0.1.0 with the VM still
-  running produced exactly that record mismatch.
+- `down`, `destroy`, `rebuild` and `up` refuse while the overlay is open in
+  another process. The test is the disk's own lock: QEMU locks every image
+  it opens and `qemu-img` will not open one that is held for writing. It
+  does not depend on the pid record, on how the state directory's path is
+  spelled (`/tmp/state/.` or a symlink names the same disk), or on any
+  process's command line. Before, a VM the record did not vouch for counted
+  as "not running", and `destroy` or `rebuild` then removed the overlay and
+  the UEFI variables from under it; updating from 0.1.0 with the VM still
+  running produced exactly that mismatch.
 - The guest no longer powers itself off at a critical battery level. UPower
   has its own critical action, separate from Plasma's; with sleep disabled
   it fell through to PowerOff, and a guest at 1% shut down 22 seconds later.
   It is now `Ignore`, and the factory build fails if that did not take.
 - Two runtime builds can no longer share a scratch checkout or a runtime
-  root (kernel locks in `runtime/build.sh`): the second could revert the
-  first one's rebrand under its compiler.
+  root: the second could revert the first one's rebrand under its compiler.
+  The locks are inherited by everything a build starts, so they hold while
+  a compiler left behind by a killed build is still running.
 - `KDEVM_TIMEZONE` is validated before anything is built; the rendered-seed
   checks are skipped together when PyYAML is missing; the Dock icon is built
   under a name no other `up` shares.
@@ -25,7 +30,13 @@ fixes so far:
   was taken as proof that they had ended. Each helper now has a full
   identity record of its own, a helper that will not end keeps its record
   and makes `down` exit 2, and `status` no longer searches the process table
-  by socket path. 74 offline checks in all.
+  by socket path.
+- Second review pass (commit b133a06). Each helper now registers itself: a
+  launcher writes its own pid and start time to the bridge's record and
+  then becomes the helper, so no helper ever runs without a record and none
+  is ever signalled by a bare pid; one that cannot register is not started.
+  `status` writes nothing at all (it could delete the record of a VM that a
+  concurrent `up` had just started). 79 offline checks in all.
 
 - Battery mirroring: the Mac's battery appears in the guest as a real
   `BAT0`/`ADP0` (charge, state, time estimates, cycle count), so UPower and

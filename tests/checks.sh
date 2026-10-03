@@ -464,37 +464,86 @@ else
 fi
 
 # 12b. two runtime builds cannot share a scratch checkout or a runtime root:
-#      a builder that finds either kernel lock held refuses before touching
-#      the checkout (a concurrent build would revert its rebrand edits)
+#      a builder that finds either lock held refuses before touching the
+#      checkout (a concurrent build would revert its rebrand edits). The lock
+#      is inherited by what a build starts, so it also holds after the
+#      builder itself is SIGKILLed, for as long as one of its children lives.
+cat > "$T/treeholder.zsh" <<'EOF'
+# usage: treeholder.zsh LIB LOCKFILE : take the lock as a build does, start a child, stay
+source "$1"; take_tree_lock "$2" || { echo refused; exit 1; }
+sleep 4 & echo "held $!"; sleep 30
+EOF
 for held in root scratch; do
   mkdir -p "$T/v12b/$held/rt" "$T/v12b/$held/scratch"
   [[ $held == root ]] && lf="$T/v12b/$held/rt/build.lock" || lf="$T/v12b/$held/scratch/build.lock"
-  zsh -c 'zmodload zsh/system; : >> "$1"; zsystem flock "$1"; echo held; sleep 30' _ "$lf" > "$T/v12b/$held/holder.out" 2>&1 & LH3=$!
-  for i in {1..50}; do [[ "$(cat "$T/v12b/$held/holder.out" 2>/dev/null)" == held ]] && break; sleep 0.1; done
-  out=$(KDEVM_RUNTIME_ROOT="$T/v12b/$held/rt" KDEVM_SCRATCH="$T/v12b/$held/scratch" ./runtime/build.sh 2>&1); rc=$?
+  zsh "$T/treeholder.zsh" "$REPO/lib/kdevm-common.zsh" "$lf" > "$T/v12b/$held/holder.out" 2>&1 & LH3=$!
+  for i in {1..50}; do [[ "$(cat "$T/v12b/$held/holder.out" 2>/dev/null)" == held* ]] && break; sleep 0.1; done
+  b12() { KDEVM_RUNTIME_ROOT="$T/v12b/$held/rt" KDEVM_SCRATCH="$T/v12b/$held/scratch" ./runtime/build.sh 2>&1; }
+  out=$(b12); rc=$?
   if [[ $rc -ne 0 && "$out" == *"another runtime build is running"* && "$out" != *"KDEVM_OFFLINE"* && ! -d "$T/v12b/$held/scratch/try-omarchy" ]]; then pass "runtime build refused while another holds the $held lock; checkout untouched"; else fail "runtime build lock ($held; rc=$rc: $out)"; fi
-  kill $LH3 2>/dev/null; wait $LH3 2>/dev/null
+  if [[ $held == scratch ]]; then
+    # the builder dies abnormally; the child it started (a compiler, in real life) is still at work
+    child=$(cut -d' ' -f2 "$T/v12b/$held/holder.out"); kill -9 $LH3; wait $LH3 2>/dev/null
+    for p in $(pgrep -P 1 -x sleep); do [[ "$(ps -o command= -p $p)" == "sleep 30" && "$(ps -o lstart= -p $p)" == "$(ps -o lstart= -p $child)" ]] && kill $p; done 2>/dev/null
+    out=$(b12); rc=$?
+    if kill -0 "$child" 2>/dev/null && [[ $rc -ne 0 && "$out" == *"another runtime build is running"* ]]; then pass "builder SIGKILLed with a child still running: the tree stays locked"; else fail "lock after the builder's death (rc=$rc child alive=$(kill -0 "$child" 2>/dev/null && echo yes || echo no): $out)"; fi
+    wait_gone() { for i in {1..60}; do kill -0 "$1" 2>/dev/null || return 0; sleep 0.1; done; }; wait_gone "$child"
+    out=$(b12); rc=$?
+    [[ "$out" == *"KDEVM_OFFLINE"* && "$out" != *"another runtime build"* ]] && pass "once that child has ended the lock is free (the build goes on to the offline guard)" || fail "lock not released after the last inheritor ended (rc=$rc: $out)"
+  else
+    kill $LH3 2>/dev/null; wait $LH3 2>/dev/null; pkill -P $LH3 2>/dev/null
+  fi
 done
 
-# 12c. a QEMU that has this state's overlay open but is not vouched for by the
-#      pid record (no record, or one written by an older kdevm: another start
-#      time rendering) is never treated as stopped: down, destroy and rebuild
-#      refuse, the disks stay, the process is not signalled
-mkdir -p "$T/v12c"; : > "$T/v12c/work.qcow2"; : > "$T/v12c/efivars.fd"; : > "$T/v12c/factory.qcow2"
-ARGV0="/old/runtime/bin/qemu-system-aarch64 -name kdevm -drive if=none,id=root,file=$T/v12c/work.qcow2,format=qcow2" zsh -c 'sleep 120; :' & OLDQ=$!; sleep 0.3
-stray_ok=1
-for record in none old; do
-  for verb in down destroy "destroy --all" rebuild; do
-    [[ $record == old ]] && echo "$OLDQ $(TZ=Asia/Tokyo ps -o lstart= -p $OLDQ | awk '{$1=$1; print}')" > "$T/v12c/qemu.pid" || rm -f "$T/v12c/qemu.pid"
-    out=$(KDEVM_STATE="$T/v12c" KDEVM_RUNTIME_ROOT="$T/fakert4" ./kdevm.sh ${=verb} 2>&1); rc=$?
-    if [[ $rc -eq 0 || "$out" != *"but is not tracked"* || "$out" != *"pid $OLDQ"* || ! -e "$T/v12c/work.qcow2" || ! -e "$T/v12c/efivars.fd" || ! -e "$T/v12c/factory.qcow2" ]] || ! kill -0 $OLDQ 2>/dev/null; then stray_ok=0; echo "      $verb with record=$record: rc=$rc $(echo "$out" | tail -1)"; fi
+# 12c. a disk that a process has open (QEMU's image lock; here qemu-io holds
+#      it the same way) is never removed or started on, whatever the pid
+#      record says and however the state directory's path is spelled: down,
+#      destroy and rebuild refuse, the disks stay, the holder is untouched
+QIO="${QI%/*}/qemu-io"
+if [[ -x "$QI" && -x "$QIO" ]]; then
+  mkdir -p "$T/v12c"; ln -s "$T/v12c" "$T/v12c-alias"
+  "$QI" create -q -f qcow2 "$T/v12c/factory.qcow2" 1M; "$QI" create -q -f qcow2 -b "$T/v12c/factory.qcow2" -F qcow2 "$T/v12c/work.qcow2"; : > "$T/v12c/efivars.fd"
+  "$QIO" -c "sleep 60000" "$T/v12c/work.qcow2" >/dev/null 2>&1 & OLDQ=$!; sleep 0.7
+  stray_ok=1
+  for st in "$T/v12c" "$T/v12c/." "$T/v12c-alias"; do
+    for record in none old; do
+      for verb in down destroy "destroy --all" rebuild; do
+        [[ $record == old ]] && echo "$OLDQ $(TZ=Asia/Tokyo ps -o lstart= -p $OLDQ | awk '{$1=$1; print}')" > "$T/v12c/qemu.pid" || rm -f "$T/v12c/qemu.pid"
+        out=$(KDEVM_STATE="$st" KDEVM_RUNTIME_ROOT="$T/fakert4" ./kdevm.sh ${=verb} 2>&1); rc=$?
+        if [[ $rc -eq 0 || "$out" != *"is in use or unreadable; refusing to"* || ! -e "$T/v12c/work.qcow2" || ! -e "$T/v12c/efivars.fd" || ! -e "$T/v12c/factory.qcow2" ]] || ! kill -0 $OLDQ 2>/dev/null; then stray_ok=0; echo "      $verb, state as ${st#$T/}, record=$record: rc=$rc $(echo "$out" | tail -1 | cut -c1-160)"; fi
+      done
+    done
   done
-done
-[[ $stray_ok -eq 1 ]] && pass "untracked QEMU on the overlay: down, destroy, destroy --all and rebuild refuse (no record, and a 0.1-style record); disks kept, process untouched" || fail "stray QEMU guard on destructive verbs"
-kill $OLDQ 2>/dev/null; wait $OLDQ 2>/dev/null
-# the same verbs still work when nothing has the overlay open
-out=$(KDEVM_STATE="$T/v12c" KDEVM_RUNTIME_ROOT="$T/fakert4" ./kdevm.sh destroy 2>&1); rc=$?
-[[ $rc -eq 0 && ! -e "$T/v12c/work.qcow2" && -e "$T/v12c/factory.qcow2" ]] && pass "destroy with nothing on the overlay: overlay removed, factory kept" || fail "destroy on an idle state (rc=$rc: $out)"
+  [[ $stray_ok -eq 1 ]] && pass "disk held open: down, destroy, destroy --all and rebuild refuse under the plain path, a '/.' spelling and a symlink, with no record and with a 0.1-style record; disks kept, holder untouched" || fail "open-disk guard on destructive verbs"
+  kill $OLDQ 2>/dev/null; wait $OLDQ 2>/dev/null
+  # a process that merely mentions the overlay (a log viewer) is not a holder: the same verbs go ahead
+  rm -f "$T/v12c/qemu.pid"; ARGV0="less -p file=$T/v12c/work.qcow2 some.log" zsh -c 'sleep 120; :' & MENT=$!; sleep 0.3
+  out=$(KDEVM_STATE="$T/v12c" KDEVM_RUNTIME_ROOT="$T/fakert4" ./kdevm.sh destroy 2>&1); rc=$?
+  if [[ $rc -eq 0 && ! -e "$T/v12c/work.qcow2" && -e "$T/v12c/factory.qcow2" ]] && kill -0 $MENT 2>/dev/null; then pass "nothing holds the disk (a process only names it): destroy removes the overlay, keeps the factory, touches no process"; else fail "destroy on an idle state (rc=$rc: $out)"; fi
+  kill $MENT 2>/dev/null; wait $MENT 2>/dev/null
+else
+  echo "SKIP  open-disk guard (needs qemu-img and qemu-io)"
+fi
+
+# 12d. status is a query: even when the recorded QEMU stops being ours between
+#      two of its own lookups, it removes no record (a concurrent up may have
+#      just written that file)
+mkdir -p "$T/v12d" "$T/fakebin3"
+ARGV0="$T/fakert4/current/bin/kdevm -drive file=$T/v12d/work.qcow2" zsh -c 'sleep 120; :' & FQ2=$!; sleep 0.3
+echo "$FQ2 $(proc_start $FQ2)" > "$T/v12d/qemu.pid"; echo "$FQ2 $(proc_start $FQ2)" > "$T/v12d/bridge-clipboard.pid"
+cat > "$T/fakebin3/ps" <<'EOF'
+#!/bin/sh
+# the first two start-time lookups answer truthfully; every later one says the pid is somebody else
+for a in "$@"; do if [ "$a" = "lstart=" ]; then
+  n=$(cat "$KDEVM_TEST_PSCOUNT" 2>/dev/null || echo 0); echo $((n + 1)) > "$KDEVM_TEST_PSCOUNT"
+  [ "$n" -ge 2 ] && { echo "Thu Jan  1 00:00:00 1970"; exit 0; }
+fi; done
+exec /bin/ps "$@"
+EOF
+chmod +x "$T/fakebin3/ps"; before=$(cat "$T/v12d/qemu.pid" "$T/v12d/bridge-clipboard.pid")
+out=$(PATH="$T/netstub:$T/fakebin3:$PATH" KDEVM_TEST_PSCOUNT="$T/v12d/pscount" KDEVM_TEST_NETLOG=/dev/null KDEVM_STATE="$T/v12d" KDEVM_RUNTIME_ROOT="$T/fakert4" ./kdevm.sh status 2>&1)
+if [[ "$out" == *"qemu: pid $FQ2"* && "$(cat "$T/v12d/qemu.pid" "$T/v12d/bridge-clipboard.pid" 2>/dev/null)" == "$before" ]]; then pass "status: a QEMU whose identity changes between lookups costs no record (one inspection, nothing written)"; else fail "status mutated a record ($(ls "$T/v12d" | tr '\n' ' '); lookups: $(cat "$T/v12d/pscount" 2>/dev/null))"; fi
+kill $FQ2 2>/dev/null; wait $FQ2 2>/dev/null
 
 # 13. host bridges, end to end with fakes: a fake QEMU that binds every chardev
 #     socket and answers QMP (system_powerdown ends it), and a fake helper that
@@ -564,6 +613,28 @@ EOF
   if [[ $rc -eq 0 && -n "$c13" && -n "$b13" && "$(rec13 clipboard)" != "$c13" && "$(rec13 battery)" != "$b13" && -n "$(rec13 timezone)" && "$(echo $(helpers13) | wc -w | tr -d ' ')" == 3 ]] && ! kill -0 $c13 2>/dev/null && ! kill -0 $b13 2>/dev/null; then pass "up after the VM ended by itself: the two leftover helpers stopped, three new ones recorded"; else fail "up over leftover helpers (rc=$rc helpers='$(helpers13)': $(echo "$out" | tail -2 | tr '\n' ' '))"; fi
   out=$(k13 down); rc=$?
   [[ $rc -eq 0 && -z "$(helpers13)" ]] && ! kill -0 "$FQ13" 2>/dev/null && pass "down afterwards: clean exit, no helper left" || fail "down after restart (rc=$rc helpers='$(helpers13)')"
+  # 13h. a helper that cannot register itself never starts: the record's path
+  #      is unwritable (a directory) for one bridge. No process for it, no
+  #      signal sent to anything, a warning, and the desktop still starts
+  mkdir "$T/v13/bridge-battery.pid"; : > "$T/v13/helpers.log"
+  out=$(k13 up); rc=$?; FQ13=$(cut -d' ' -f1 "$T/v13/qemu.pid" 2>/dev/null); sleep 0.5; st=$(k13 status)
+  if [[ $rc -eq 0 && "$out" == *"warning: the battery bridge helper is not running"* && -z "$(pgrep -f -- "--bridge-native-battery .* $T/v13/run/battery.sock")" && "$st" == *"-- bridge battery: NOT RUNNING"* && "$st" == *"-- bridge clipboard: helper pid "* && "$(logged13 battery)" == 0 ]] && grep -q "could not register this bridge helper" "$T/v13/bridges.log"; then pass "a helper that cannot write its record is never started; up warns, the other bridges run"; else fail "unregistrable helper (rc=$rc: $(echo "$st" | grep bridge | tr '\n' ';') log: $(tail -1 "$T/v13/bridges.log"))"; fi
+  out=$(k13 down); rc=$?; rmdir "$T/v13/bridge-battery.pid" 2>/dev/null; [[ $rc -eq 0 && -z "$(helpers13)" ]] || fail "down after an unregistrable helper (rc=$rc)"
+  # 13i. the same when a helper's start time cannot be read at launch: the
+  #      launcher gives up before the helper exists, so there is nothing to
+  #      stop and nothing is signalled by pid
+  cat > "$T/fakebin3/ps" <<'EOF'
+#!/bin/sh
+# fail the start-time lookup only for a bridge launcher (its command line names itself)
+pid=""; ls=0; prev=""
+for a in "$@"; do [ "$a" = "lstart=" ] && ls=1; [ "$prev" = "-p" ] && pid=$a; prev=$a; done
+if [ "$ls" = 1 ] && [ -n "$pid" ]; then case "$(/bin/ps -o command= -p "$pid" 2>/dev/null)" in *kdevm-bridge-launch*) exit 1 ;; esac; fi
+exec /bin/ps "$@"
+EOF
+  : > "$T/v13/helpers.log"
+  out=$(PATH="$T/fakebin3:$PATH" k13 up); rc=$?; sleep 0.5
+  if [[ $rc -eq 0 && -z "$(helpers13)" && "$(wc -l < "$T/v13/helpers.log" | tr -d ' ')" == 0 && -z "$(ls "$T/v13" | grep '^bridge-.*pid')" && "$out" == *"warning: the clipboard bridge helper is not running"* ]] && kill -0 "$(cut -d' ' -f1 "$T/v13/qemu.pid")" 2>/dev/null; then pass "start time unreadable at launch: no helper is started, none is recorded, QEMU runs on"; else fail "launch without a start time (rc=$rc helpers='$(helpers13)' records: $(ls "$T/v13" | grep bridge | tr '\n' ' '))"; fi
+  out=$(k13 down); rc=$?; [[ $rc -eq 0 ]] || fail "down after a launch without start times (rc=$rc)"
   # 13g. a helper that exits at once does not stop the desktop: up succeeds, status reports that bridge NOT RUNNING
   out=$(KDEVM_FAKE_HELPER_FAIL=battery k13 up); rc=$?; sleep 1; st=$(k13 status)
   if [[ $rc -eq 0 && "$st" == *"-- bridge battery: NOT RUNNING"* && "$st" == *"-- bridge clipboard: helper pid "* && "$st" == *"-- bridge timezone: helper pid "* ]]; then pass "a helper that exits at once: up still succeeds, status reports that bridge NOT RUNNING"; else fail "helper failing at start (rc=$rc: $(echo "$st" | grep bridge | tr '\n' ';'))"; fi

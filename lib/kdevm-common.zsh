@@ -78,6 +78,18 @@ take_lock() {
   fi
 }
 
+# take_tree_lock FILE: an exclusive lock on a directory tree that is held for
+# as long as this process OR ANY PROCESS IT STARTS is alive. The lifecycle
+# lock above belongs to one process, which is right for kdevm.sh; a build
+# hands its tree to compilers that can outlive it. flock(2) locks belong to
+# the open file, and children inherit the descriptor, so the kernel keeps
+# the lock until the last of them has ended. Returns 1 if it is held.
+take_tree_lock() {
+  local fd
+  exec {fd}>>"$1" || return 1
+  python3 -c 'import fcntl, sys; fcntl.flock(int(sys.argv[1]), fcntl.LOCK_EX | fcntl.LOCK_NB)' $fd 2>/dev/null
+}
+
 # ---- QMP -------------------------------------------------------------------
 # qmp COMMAND: one command over the unix socket $QMP. Prints the "return"
 # value and exits 0 ONLY on a successful reply; exits 2 on connect failure,

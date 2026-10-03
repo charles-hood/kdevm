@@ -36,11 +36,12 @@ UPSTREAM=https://github.com/omacom/try-omarchy
 
 # One build at a time per scratch checkout and per runtime root: a second
 # build would revert the first one's rebrand edits under its compiler, or
-# stage over it. Kernel advisory locks, held by this process until it ends.
+# stage over it. The locks are inherited by everything this build starts
+# (take_tree_lock), so a compiler left running by a killed build still
+# holds them.
 mkdir -p "$SCRATCH" "$DEST_ROOT"
 for lockfile in "$DEST_ROOT/build.lock" "$SCRATCH/build.lock"; do
-  : >> "$lockfile"
-  zsystem flock -t 0 "$lockfile" 2>/dev/null || die "another runtime build is running ($lockfile is held); wait for it"
+  take_tree_lock "$lockfile" || die "another runtime build is running, or its compilers still are ($lockfile is held); wait for them"
 done
 
 if [[ -x "$DEST/bin/kdevm" && -x "$DEST/bin/omarchy-vm-helper" && "${1:-}" != --force ]]; then
