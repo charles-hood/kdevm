@@ -17,7 +17,7 @@
   compiler and `install_name_tool` warnings in code that is not kdevm's;
   none was a problem and all looked like one. The output now goes to
   `runtime-build.log` in the build directory, the terminal shows the
-  build's dozen stage lines, and a failed build prints the log's tail.
+  build's download and stage lines, and a failed build prints the log's tail.
 - **Run on a second machine**: an M3 Pro on macOS 26.6.2, from a fresh
   clone by the README's steps, removal included. The record is in
   [docs/runbook.md](docs/runbook.md).
