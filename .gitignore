@@ -8,3 +8,7 @@
 *.iso
 *.fd
 .build/
+# local config and editor noise
+.env
+*.swp
+*~

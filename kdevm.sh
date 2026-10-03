@@ -4,7 +4,7 @@
 # Cocoa + VirGL, SLIRP, SDL duplex audio, virtio-9p) and its Swift helper for
 # the clipboard bridge. Guest: our own Debian factory (guest/build.sh).
 #
-#   kdevm.sh runtime     build/stage the QEMU runtime + helper (~/Artifacts/kdevm-runtime)
+#   kdevm.sh runtime     build/stage the QEMU runtime + helper
 #   kdevm.sh factory     build the Debian factory image (~/.cache/kdevm/factory.qcow2)
 #   kdevm.sh up          start the desktop (overlay on the factory; builds what is missing)
 #   kdevm.sh launch      same as up (the window IS the session; Lab Launcher vocabulary)
@@ -16,20 +16,24 @@
 #   kdevm.sh ssh [cmd]   ssh into the guest on localhost:2222
 #   kdevm.sh console     tail the guest serial log
 #
-# Env: KDEVM_CPUS (4) KDEVM_MEM_MB (8192) KDEVM_SCALE (auto|1|2) KDEVM_SHARE
-# (~/kdevm-share) KDEVM_FULLSCREEN (off). Everything large lives outside the
-# repo: runtime in ~/Artifacts, images/sockets/logs in ~/.cache/kdevm.
+# Config: environment variables, optionally set in ~/.config/kdevm/env
+# (sourced if present). KDEVM_CPUS (4) KDEVM_MEM_MB (8192) KDEVM_SCALE
+# (auto|1|2) KDEVM_SHARE (~/kdevm-share) KDEVM_FULLSCREEN (off) KDEVM_WINDOW
+# (auto|keep|WxH) KDEVM_USER (your login name) KDEVM_RUNTIME_ROOT
+# (~/.local/share/kdevm/runtime) KDEVM_STATE (~/.cache/kdevm). Everything
+# large lives outside the repo.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")" && pwd)"
+[[ -f "$HOME/.config/kdevm/env" ]] && source "$HOME/.config/kdevm/env"
 STATE="${KDEVM_STATE:-$HOME/.cache/kdevm}"
-RT="${KDEVM_RUNTIME:-$HOME/Artifacts/kdevm-runtime/current}"
+RT="${KDEVM_RUNTIME_ROOT:-${XDG_DATA_HOME:-$HOME/.local/share}/kdevm/runtime}/current"
 QEMU="$RT/bin/qemu-system-aarch64"
 HELPER="$RT/bin/omarchy-vm-helper"
 QEMU_IMG="${QEMU_IMG:-/opt/homebrew/bin/qemu-img}"
 FW_CODE="${KDEVM_FW_CODE:-/opt/homebrew/share/qemu/edk2-aarch64-code.fd}"
 FW_VARS_TEMPLATE="${KDEVM_FW_VARS:-/opt/homebrew/share/qemu/edk2-arm-vars.fd}"
-USER_NAME="${KDEVM_USER:-charles}"
+USER_NAME="${KDEVM_USER:-$(id -un)}"
 SSH_PORT="${KDEVM_SSH_PORT:-2222}"
 CPUS="${KDEVM_CPUS:-4}"
 MEM_MB="${KDEVM_MEM_MB:-8192}"

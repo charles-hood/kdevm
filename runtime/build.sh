@@ -9,19 +9,20 @@
 # bottles), applies all 23 patches, relocates the dylibs and ad-hoc signs
 # with the HVF entitlement. Then `swift build` produces the helper.
 #
-# Output: ~/Artifacts/kdevm-runtime/<pin>/{bin,lib,provenance.txt} and a
-# `current` symlink. ~/Artifacts is the house home for artifacts that are
-# slow to regenerate (this one is 30+ minutes).
+# Output: $KDEVM_RUNTIME_ROOT/<pin>/{bin,lib,provenance.txt} and a `current`
+# symlink; default ~/.local/share/kdevm/runtime. About two minutes on an
+# M4 Pro. Optional config: ~/.config/kdevm/env.
 #
 #   runtime/build.sh            build (skips if <pin> already staged)
 #   runtime/build.sh --force    rebuild even if staged
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
+[[ -f "$HOME/.config/kdevm/env" ]] && source "$HOME/.config/kdevm/env"
 PIN="$(tr -d '[:space:]' < "$REPO/runtime/pin.txt")"
-SCRATCH="${KDEVM_SCRATCH:-$HOME/.cache/kdevm/build}"
+SCRATCH="${KDEVM_SCRATCH:-${KDEVM_STATE:-$HOME/.cache/kdevm}/build}"
 SRC="$SCRATCH/try-omarchy"
-DEST_ROOT="${KDEVM_RUNTIME_ROOT:-$HOME/Artifacts/kdevm-runtime}"
+DEST_ROOT="${KDEVM_RUNTIME_ROOT:-${XDG_DATA_HOME:-$HOME/.local/share}/kdevm/runtime}"
 DEST="$DEST_ROOT/$PIN"
 UPSTREAM=https://github.com/omacom/try-omarchy
 

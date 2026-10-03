@@ -3,6 +3,12 @@
 Measured facts, provenance, fallbacks taken, gotchas. Dates are when the
 fact was established on the M4 Pro.
 
+Paths: this runbook records the author's machine, where the runtime lives in
+`~/Artifacts/kdevm-runtime/` and the guest user is `charles`. Since the
+release hygiene pass (2026-10-02) the defaults are
+`~/.local/share/kdevm/runtime` and the host login name, with the author's
+values kept in `~/.config/kdevm/env`.
+
 ## Provenance
 
 | component | value |

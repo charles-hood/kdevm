@@ -7,22 +7,30 @@
 #   guest/build.sh            build (refuses if factory.qcow2 exists; use rebuild)
 #   guest/build.sh --force    replace an existing factory
 #
-# Needs: the runtime (runtime/build.sh), mkisofs (brew cdrtools), the house
-# password file in home-network/secrets, ~/.ssh/id_ed25519.pub.
+# Needs: the runtime (runtime/build.sh), mkisofs (brew cdrtools), Homebrew
+# qemu (qemu-img and the edk2 firmware), an ssh public key. The guest
+# password comes from KDEVM_PASS_FILE (default ~/.config/kdevm/password,
+# generated on first use). Optional config: ~/.config/kdevm/env.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
+[[ -f "$HOME/.config/kdevm/env" ]] && source "$HOME/.config/kdevm/env"
 STATE="${KDEVM_STATE:-$HOME/.cache/kdevm}"
-RT="${KDEVM_RUNTIME:-$HOME/Artifacts/kdevm-runtime/current}"
+RT="${KDEVM_RUNTIME_ROOT:-${XDG_DATA_HOME:-$HOME/.local/share}/kdevm/runtime}/current"
 QEMU="$RT/bin/qemu-system-aarch64"
 QEMU_IMG="${QEMU_IMG:-/opt/homebrew/bin/qemu-img}"
 FW_CODE="${KDEVM_FW_CODE:-/opt/homebrew/share/qemu/edk2-aarch64-code.fd}"
 FW_VARS_TEMPLATE="${KDEVM_FW_VARS:-/opt/homebrew/share/qemu/edk2-arm-vars.fd}"
 IMAGE_URL=https://cloud.debian.org/images/cloud/trixie/latest
 IMAGE=debian-13-generic-arm64.qcow2
-USER_NAME="${KDEVM_USER:-charles}"
-PASS_FILE="${KDEVM_PASS_FILE:-$HOME/projects/home-network/secrets/xrdp-desktop-pass.txt}"
-SSH_PUB="${KDEVM_SSH_PUB:-$HOME/.ssh/id_ed25519.pub}"
+USER_NAME="${KDEVM_USER:-$(id -un)}"
+PASS_FILE="${KDEVM_PASS_FILE:-$HOME/.config/kdevm/password}"
+SSH_PUB="${KDEVM_SSH_PUB:-}"
+if [[ -z "$SSH_PUB" ]]; then
+  for k in "$HOME/.ssh/id_ed25519.pub" "$HOME/.ssh/id_ecdsa.pub" "$HOME/.ssh/id_rsa.pub"; do
+    [[ -f "$k" ]] && { SSH_PUB="$k"; break; }
+  done
+fi
 SSH_PORT="${KDEVM_SSH_PORT:-2222}"
 DISK_GB="${KDEVM_DISK_GB:-40}"
 FACTORY="$STATE/factory.qcow2"
@@ -38,8 +46,14 @@ log() { echo "== $(date +%H:%M:%S) $*"; }
 [[ -x "$QEMU_IMG" ]] || die "qemu-img missing (brew install qemu)"
 command -v mkisofs >/dev/null || die "mkisofs missing (brew install cdrtools)"
 [[ -f "$FW_CODE" && -f "$FW_VARS_TEMPLATE" ]] || die "edk2 firmware missing at $FW_CODE / $FW_VARS_TEMPLATE"
-[[ -f "$PASS_FILE" ]] || die "password file missing: $PASS_FILE"
-[[ -f "$SSH_PUB" ]] || die "ssh public key missing: $SSH_PUB"
+if [[ ! -f "$PASS_FILE" ]]; then
+  # The guest user's password (sddm and sudo are passwordless anyway; this is
+  # for the lock screen and `su`). Generated once, kept private.
+  install -d -m 700 "$(dirname "$PASS_FILE")"
+  LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 20 > "$PASS_FILE"; chmod 600 "$PASS_FILE"
+  echo "generated a guest password at $PASS_FILE (set KDEVM_PASS_FILE to use your own)"
+fi
+[[ -n "$SSH_PUB" && -f "$SSH_PUB" ]] || die "no ssh public key found; set KDEVM_SSH_PUB or run ssh-keygen -t ed25519"
 if [[ -f "$FACTORY" && "${1:-}" != --force ]]; then
   die "$FACTORY exists; use 'kdevm.sh rebuild' or --force"
 fi
