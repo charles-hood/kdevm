@@ -38,14 +38,25 @@ def zone_from(line, zoneinfo=ZONEINFO):
 
 def main():
     with open(PORT, "rb", buffering=0) as port:
+        discarding = False
         while True:
             line = port.readline(4097)
             if not line:
                 # A read returns at once while no host bridge is connected.
+                discarding = False
                 time.sleep(2)
                 continue
+            complete = line.endswith(b"\n")
+            if discarding or not complete:
+                # Longer than any message, or cut off: none of it is a
+                # message. Keep dropping until the end of that same line, so
+                # its tail is never read as a message of its own.
+                if not discarding:
+                    print("rejected an overlong or unterminated line from the host", flush=True)
+                discarding = not complete
+                continue
             try:
-                zone = zone_from(line)
+                zone = zone_from(line, ZONEINFO)
             except ValueError as error:
                 print(f"rejected a message from the host: {error}", flush=True)
                 continue

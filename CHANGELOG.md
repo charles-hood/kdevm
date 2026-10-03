@@ -36,7 +36,25 @@ fixes so far:
   then becomes the helper, so no helper ever runs without a record and none
   is ever signalled by a bare pid; one that cannot register is not started.
   `status` writes nothing at all (it could delete the record of a VM that a
-  concurrent `up` had just started). 79 offline checks in all.
+  concurrent `up` had just started).
+- First closure pass (commit bde8dd5) against the frozen rubric: eleven
+  items not met, most of them in code unchanged since 0.1.0 that the rubric
+  now covers. There is one way to start a process and one way to stop one,
+  used for QEMU and for every helper. `launch_tracked`: the record file is
+  opened by `up` and handed to the launcher as a descriptor, so a delayed
+  launcher can never write into a newer session's record, and QEMU too is
+  recorded before it exists. `stop_tracked`: every signal, SIGKILL included,
+  is sent only after the record has been checked against the live process,
+  and a record is dropped only once the exit is confirmed; a QEMU that
+  cannot be confirmed stopped keeps its record, `down` exits 2, and
+  `destroy` and `rebuild` remove nothing (they also check the disk's lock
+  again just before removing). Also: `down` clears sockets a crashed QEMU
+  left; `status` no longer lets ssh write `known_hosts`; the Cocoa rename in
+  the runtime build is verified like the helper's; the time zone receiver
+  drops an overlong line whole instead of reading its tail as a message;
+  the seed renderer makes one pass, so a password such as `@@SSHKEY@@` stays
+  a password; `ssh` and `nc` are failing stubs for the whole test suite.
+  90 offline checks in all.
 
 - Battery mirroring: the Mac's battery appears in the guest as a real
   `BAT0`/`ADP0` (charge, state, time estimates, cycle count), so UPower and

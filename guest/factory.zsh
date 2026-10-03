@@ -105,25 +105,31 @@ kdevm_factory_build() {   # [--force]
   python3 - "$REPO/guest/user-data.yaml.tmpl" "$F_SEED_DIR/user-data" "$REPO/guest" <<'PY'
 import base64, json, os, re, sys
 tmpl, out, guest = sys.argv[1:]
-text = open(tmpl, encoding="utf-8").read()
-# @@B64:<path under guest/>@@ inlines that file, base64. Done before the
-# user's values go in, so nothing in a password or key is ever expanded.
-text = re.sub(r"@@B64:([A-Za-z0-9._/-]+)@@",
-              lambda m: base64.b64encode(open(os.path.join(guest, m.group(1)), "rb").read()).decode(), text)
-for k, v in {
-    "@@USER@@": os.environ["KDEVM_USER_NAME"],
+values = {
+    "USER": os.environ["KDEVM_USER_NAME"],
     # JSON strings are valid YAML double-quoted scalars: any password survives
     # (&, |, #, a leading digit, quotes, backslashes).
     # ensure_ascii=False: raw UTF-8 is valid inside a YAML double-quoted
-    # scalar, while JSON's 🔑 surrogate pairs are not (PyYAML
+    # scalar, while JSON's \ud83d\udd11 surrogate pairs are not (PyYAML
     # returns two surrogates for an emoji and the guest cannot encode them).
-    "@@PASS@@": json.dumps(os.environ["KDEVM_PASS"], ensure_ascii=False),
-    "@@SSHKEY@@": json.dumps(os.environ["KDEVM_SSHKEY"], ensure_ascii=False),
-}.items():
-    text = text.replace(k, v)
-open(out, "w", encoding="utf-8").write(text)
+    "PASS": json.dumps(os.environ["KDEVM_PASS"], ensure_ascii=False),
+    "SSHKEY": json.dumps(os.environ["KDEVM_SSHKEY"], ensure_ascii=False),
+}
+TOKEN = r"@@(B64:[A-Za-z0-9._/-]+|USER|PASS|SSHKEY)@@"
+def expand(match):
+    name = match.group(1)
+    if name.startswith("B64:"):   # inline that file under guest/, base64
+        return base64.b64encode(open(os.path.join(guest, name[4:]), "rb").read()).decode()
+    return values[name]
+text = open(tmpl, encoding="utf-8").read()
+unknown = [t for t in re.findall(r"@@[^@\n]*@@", text) if not re.fullmatch(TOKEN, t)]
+if unknown:
+    sys.exit(f"unknown token in the template: {unknown[0]}")
+# ONE pass over the template. What a token expands to is never scanned again,
+# so nothing in a password, a key, a user name or an inlined file can be
+# taken for a token.
+open(out, "w", encoding="utf-8").write(re.sub(TOKEN, expand, text))
 PY
-  grep -q '@@' "$F_SEED_DIR/user-data" && die "unrendered token in user-data"
   printf 'instance-id: kdevm-factory-%s\nlocal-hostname: kdevm\n' "$(date +%Y%m%d%H%M%S)" > "$F_SEED_DIR/meta-data"
   mkisofs -quiet -V cidata -J -r -o "$STATE/seed.iso" "$F_SEED_DIR/user-data" "$F_SEED_DIR/meta-data"
 

@@ -92,28 +92,7 @@ bridge_state() { # name -> running | unknown | absent
   local PF_PID PF_START; read_pidfile "$(bridge_record $1)" || { echo absent; return 0; }
   pid_state "$PF_PID" "$PF_START" "$(bridge_pattern $1)"
 }
-# Stop one bridge helper with the same tri-state rules as QEMU:
-# running -> signal, remove the record only after the exit is confirmed;
-# absent  -> remove the stale record;
-# unknown -> signal nothing, keep the record, say so. Returns 1 when the
-# record had to be preserved (unknown, or no confirmed exit).
-stop_bridge() { # name
-  local PF_PID PF_START st i rec; rec=$(bridge_record $1)
-  read_pidfile "$rec" || return 0
-  st=$(pid_state "$PF_PID" "$PF_START" "$(bridge_pattern $1)")
-  case $st in
-    running)
-      kill "$PF_PID" 2>/dev/null || true
-      for i in {1..25}; do kill -0 "$PF_PID" 2>/dev/null || break; sleep 0.2; done
-      if kill -0 "$PF_PID" 2>/dev/null; then
-        log "$1 bridge helper pid $PF_PID did not exit after SIGTERM; tracking preserved"; return 1
-      fi
-      rm -f "$rec" ;;
-    absent)  rm -f "$rec" ;;
-    unknown) log "$1 bridge helper pid $PF_PID could not be verified (process inspection failed); not signalled, tracking preserved"; return 1 ;;
-  esac
-  return 0
-}
+stop_bridge() { stop_tracked "$(bridge_record $1)" "$(bridge_pattern $1)" "$1 bridge helper"; } # name; see stop_tracked
 stop_bridges() { local rc=0 n; for n in $BRIDGE_NAMES; do stop_bridge $n || rc=1; done; return $rc; }
 # A disk that a QEMU has open must not be started on again or removed from
 # under it. QEMU locks every image it opens, and qemu-img will not open an
@@ -131,7 +110,8 @@ refuse_if_unknown() { # verb
   local PF_PID PF_START
   if [[ "$(qemu_state)" == unknown ]]; then
     read_pidfile "$PIDFILE"
-    die "pid $PF_PID is alive but cannot be inspected; refusing to $1 (check: ps -p $PF_PID; if it is not kdevm's QEMU, remove $PIDFILE)"
+    # exit 2, as everywhere a record had to be kept
+    echo "kdevm: pid $PF_PID is alive but cannot be inspected; refusing to $1 (check: ps -p $PF_PID; if it is not kdevm's QEMU, remove $PIDFILE)" >&2; exit 2
   fi
 }
 
@@ -250,7 +230,11 @@ up() {
   # show-cursor=on the Mac cursor stayed visible on top of it and the two
   # moved together as a double cursor (seen 2026-10-03). The Cocoa frontend
   # hides the host cursor while the pointer is over the guest view.
-  "$QEMU" -name kdevm \
+  # QEMU and the bridge helpers are started with launch_tracked: each records
+  # its own pid and start time before it exists, through a record file opened
+  # here. Nothing below ever signals a pid that a record does not vouch for.
+  : > "$STATE/qemu.out"
+  launch_tracked "$PIDFILE" "$STATE/qemu.out" "$QEMU" -name kdevm \
     -machine virt,accel=hvf,gic-version=3 -cpu host,pmu=off \
     -smp "$CPUS,sockets=1,cores=$CPUS,threads=1" -m "${MEM_MB}M" -nodefaults \
     -drive if=pflash,format=raw,readonly=on,file="$FW_CODE" \
@@ -275,62 +259,48 @@ up() {
     -device virtserialport,bus=vser.0,nr=7,chardev=bat,name=dev.tryomarchy.battery \
     -fw_cfg "name=opt/kdevm/scale,string=$scale" \
     -qmp "unix:$QMP,server=on,wait=off" -serial "file:$SERIAL" -monitor none \
-    >"$STATE/qemu.out" 2>&1 {KDEVM_LOCK_FD}<&- &
-  local pid=$! start
-  # The child is ours from this moment: any failure to record its identity
-  # terminates it (TERM, wait, KILL) before the command exits.
-  start=$(proc_start $pid) || start=""
-  if [[ -z "$start" ]]; then
-    kill $pid 2>/dev/null || true
-    for i in {1..25}; do kill -0 $pid 2>/dev/null || break; sleep 0.2; done
-    kill -0 $pid 2>/dev/null && { kill -9 $pid 2>/dev/null || true; sleep 0.5; }
+    || die "could not create $PIDFILE; QEMU was not started"
+  # A launcher that could not record itself never became QEMU; one that did
+  # is vouched for by the record from here on.
+  local pid=""
+  for i in {1..50}; do pid=$(qemu_pid); [[ -n "$pid" ]] && break; sleep 0.1; done
+  if [[ -z "$pid" ]]; then
+    stop_tracked "$PIDFILE" "$QEMU_PATTERN" QEMU kill || log "the QEMU record could not be cleared (kdevm.sh status)"
     rm -f "${SOCKETS[@]}"
-    die "could not record QEMU's start time (process inspection failed); the launched QEMU (pid $pid) was terminated"
+    cat "$STATE/qemu.out" >&2
+    die "QEMU did not start: it could not be recorded with its start time, or it exited at once (see above)"
   fi
-  echo "$pid $start" > "$PIDFILE"
   for i in {1..100}; do [[ -S "$QMP" && -S "$CLIP" ]] && break; kill -0 $pid 2>/dev/null || break; sleep 0.1; done
   # The sockets appear before the disks are opened, so their existence proves
   # nothing: QEMU must report "running" over QMP (qmp() fails on EOF or an
-  # error reply) and still be alive afterwards. On failure, a child that is
-  # still alive is OUR child and is terminated before the identity is dropped.
+  # error reply) and still be alive afterwards. On failure it is stopped
+  # through its record, like any other stop.
   local ready=0 st
   for i in {1..50}; do
     kill -0 $pid 2>/dev/null || break
     if st=$(qmp query-status 2>/dev/null) && [[ "$st" == *'"running": true'* ]]; then ready=1; break; fi
     sleep 0.2
   done
-  kill -0 $pid 2>/dev/null || ready=0
+  running || ready=0
   if [[ $ready -ne 1 ]]; then
-    if kill -0 $pid 2>/dev/null; then
-      log "QEMU did not become ready; terminating pid $pid"
-      kill $pid 2>/dev/null || true
-      for i in {1..25}; do kill -0 $pid 2>/dev/null || break; sleep 0.2; done
-      kill -0 $pid 2>/dev/null && { kill -9 $pid 2>/dev/null || true; sleep 0.5; }
-    fi
-    rm -f "$PIDFILE" "${SOCKETS[@]}"
+    log "QEMU did not become ready; stopping it"
+    stop_tracked "$PIDFILE" "$QEMU_PATTERN" QEMU kill || die "QEMU did not become ready and could not be stopped; its record is kept (kdevm.sh status)"
+    rm -f "${SOCKETS[@]}"
     cat "$STATE/qemu.out" >&2
     die "QEMU failed to start (see above)"
   fi
-  # Host bridges: their helper, one process per bridge, tracked like QEMU
-  # (pid and start time, checked against its command line). Each helper
-  # registers itself: a small zsh writes its own pid and start time to the
-  # bridge's record and then execs the helper, which keeps both. So no helper
-  # ever runs without a record, whatever happens to this command, and a
-  # record that cannot be written means the helper is never started. Nothing
-  # supervises them: a helper that exits stays down until the next up, and
-  # status says so. A helper ends by itself when QEMU closes its socket; down
-  # stops any that has not. stdio is detached so no inherited pipe stays open
-  # until QEMU exits.
+  # Host bridges: their helper, one process per bridge, launched and tracked
+  # exactly as QEMU is. Nothing supervises them: a helper that exits stays
+  # down until the next up, and status says so. A helper ends by itself when
+  # QEMU closes its socket; down stops any that has not.
   local name
   for name in $bridges; do
-    zsh -c 'rec=$2; source "$1" && start=$(proc_start $$) && [[ -n "$start" ]] && print -r -- "$$ $start" > "$rec" && shift 2 && exec "$@"
-            print -u2 -r -- "kdevm: could not register this bridge helper in $rec; it was not started"; exit 1' \
-      kdevm-bridge-launch "$REPO/lib/kdevm-common.zsh" "$(bridge_record $name)" \
-      "$HELPER" --bridge-native-$name "$pid" "${BRIDGE_SOCK[$name]}" </dev/null >>"$STATE/bridges.log" 2>&1 {KDEVM_LOCK_FD}<&- &
+    launch_tracked "$(bridge_record $name)" "$STATE/bridges.log" "$HELPER" --bridge-native-$name "$pid" "${BRIDGE_SOCK[$name]}" \
+      || log "warning: could not create $(bridge_record $name); the $name bridge helper was not started"
   done
   # up only reports the outcome: give each a moment to register and settle.
   for i in {1..20}; do
-    for name in $bridges; do [[ "$(bridge_state $name)" == running ]] || continue 2; done; break
+    for name in $bridges; do [[ "$(bridge_state $name)" == running ]] || { sleep 0.1; continue 2; }; done; break
   done
   sleep 0.3
   for name in $bridges; do
@@ -362,34 +332,42 @@ down() {
     # "Not running" is only true if nothing has the overlay open. destroy and
     # rebuild come through here before they remove anything.
     refuse_if_stray "treat the VM as stopped"
-    # No QEMU: a verified helper of ours (if any lingers) is stopped too;
-    # an unverifiable one keeps its record and down reports it (exit 2).
+    # No QEMU: a verified helper of ours (if any lingers) is stopped too; an
+    # unverifiable one keeps its record and down reports it (exit 2). Sockets
+    # a crashed QEMU left behind go as well.
     local brc=0; stop_bridges || brc=$?
-    rm -f "$PIDFILE"; log "not running"
+    rm -f "$PIDFILE" "${SOCKETS[@]}"; log "not running"
     [[ $brc -eq 0 ]] || return 2
     return 0
   fi
-  local pid; pid=$(qemu_pid)
   # Plasma's power manager owns the ACPI power button and does not shut down
   # on it (seen 2026-10-02: QMP system_powerdown, 30 s, nothing), so ask the
   # guest's systemd over ssh first; QMP powerdown is the fallback for a guest
-  # without ssh; a kill is the last resort.
+  # without ssh; signals are the last resort.
   if ssh "${SSH_OPTS[@]}" -o BatchMode=yes "$USER_NAME@localhost" 'sudo systemctl poweroff' >/dev/null 2>&1; then
     log "power-off via ssh (systemctl poweroff)"
   else
     log "ssh not answering; power-off via QMP"
     qmp system_powerdown >/dev/null 2>&1 || true
   fi
-  for i in {1..45}; do kill -0 "$pid" 2>/dev/null || break; sleep 1; done
-  if kill -0 "$pid" 2>/dev/null; then log "guest did not power off in 45 s; terminating"; kill "$pid" 2>/dev/null || true; sleep 2; kill -9 "$pid" 2>/dev/null || true; fi
+  for i in {1..45}; do running || break; sleep 1; done
+  running && log "guest did not power off in 45 s; terminating QEMU"
+  # Either QEMU is gone (its record is dropped here) or it is ended now by
+  # signals sent only to the process the record vouches for. A QEMU that will
+  # not end, or can no longer be inspected, keeps its record: nothing below
+  # this line runs, and neither destroy nor rebuild goes on.
+  stop_tracked "$PIDFILE" "$QEMU_PATTERN" QEMU kill || { log "QEMU could not be confirmed stopped; its record, sockets and disks are left alone"; return 2; }
   local brc=0; stop_bridges || brc=$?
-  rm -f "$PIDFILE" "${SOCKETS[@]}"
+  rm -f "${SOCKETS[@]}"
   log "stopped (overlay kept; 'up' resumes it)"
   [[ $brc -eq 0 ]] || return 2
 }
 
 destroy() {
-  down
+  # Only after a down that left nothing behind, and only if nothing has the
+  # overlay open at this moment, is anything removed.
+  down || return $?
+  refuse_if_stray "remove its disks"
   rm -f "$WORK" "$EFIVARS" "$KNOWN_HOSTS" "$STATE/qemu.out" "$STATE/bridges.log"
   if [[ "${1:-}" == --all ]]; then
     rm -f "$FACTORY" "$STATE/factory-info.txt" "$STATE"/debian-13-generic-arm64.qcow2 "$STATE/SHA512SUMS"
@@ -399,7 +377,7 @@ destroy() {
   fi
 }
 
-rebuild() { down; rm -f "$WORK" "$EFIVARS" "$KNOWN_HOSTS"; ensure_runtime; kdevm_factory_build --force; }
+rebuild() { down || return $?; refuse_if_stray "remove its disks"; rm -f "$WORK" "$EFIVARS" "$KNOWN_HOSTS"; ensure_runtime; kdevm_factory_build --force; }
 
 ssh_guest() { ssh "${SSH_OPTS[@]}" "$USER_NAME@localhost" "$@"; }
 
@@ -447,7 +425,9 @@ status() {
     echo "-- qemu: pid $PF_PID, $(qmp query-status 2>/dev/null || echo 'QMP not answering')"
     if nc -z -G 2 localhost "$SSH_PORT" 2>/dev/null; then
       echo "-- ssh: localhost:$SSH_PORT answering"
-      ssh "${SSH_OPTS[@]}" -o BatchMode=yes "$USER_NAME@localhost" \
+      # status writes nothing, the guest's host key included: ssh uses the
+      # first value given for an option, so these come before SSH_OPTS.
+      ssh -o UserKnownHostsFile=/dev/null -o GlobalKnownHostsFile=/dev/null "${SSH_OPTS[@]}" -o BatchMode=yes "$USER_NAME@localhost" \
         'echo "-- guest: $(uname -r), seat session $(loginctl show-session $(loginctl list-sessions --no-legend | awk "\$4==\"seat0\"{print \$1; exit}") -p Type --value 2>/dev/null || echo none), uptime $(uptime -p)"' 2>/dev/null || echo "-- guest: ssh not accepting the key yet"
     else echo "-- ssh: localhost:$SSH_PORT not answering"; fi
   else echo "-- qemu: not running"; fi

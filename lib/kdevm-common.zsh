@@ -2,6 +2,7 @@
 # runtime/build.sh and tests/checks.sh. Callers set KDEVM_TOOL (message
 # prefix) before sourcing, STATE before using the lock, QMP before using qmp.
 
+KDEVM_LIB=${${(%):-%x}:A}   # this file; a launched process sources it to register itself
 die() { echo "${KDEVM_TOOL:-kdevm}: $*" >&2; exit 1; }
 log() { echo "== $*"; }
 
@@ -56,6 +57,65 @@ pid_state() {
   live=$(proc_start "$pid") || { echo unknown; return 0; }
   [[ -n "$live" ]] || { echo unknown; return 0; }
   [[ "$live" == "$start" ]] && echo running || echo absent
+}
+
+# ---- tracked processes -----------------------------------------------------
+# launch_tracked RECORD LOG COMMAND...: start COMMAND in the background as a
+# process that has registered itself in RECORD before it exists.
+#
+# The record file is created HERE, by the caller (which holds the lifecycle
+# lock), and handed to a small launcher as an open descriptor. The launcher
+# writes its own pid and start time through that descriptor and then execs
+# COMMAND, which keeps both. Consequences:
+#   - no COMMAND ever runs without a record, whatever happens to the caller;
+#   - if the start time cannot be read or written, COMMAND is never started,
+#     so there is never an unrecorded process to clean up by pid;
+#   - a launcher that is delayed until a later launch has replaced RECORD
+#     writes into its own, now unlinked, file and cannot touch the new one;
+#     it then sees that RECORD is no longer its file and does not exec.
+# The launcher's stdout and stderr, and COMMAND's, are appended to LOG.
+# Returns 1, with nothing started, if RECORD cannot be created.
+launch_tracked() { # record, log, command...
+  local rec=$1 logf=$2 rfd; shift 2
+  rm -f "$rec" 2>/dev/null || true
+  # A new file every time (creat,excl), opened here: no record file, no process.
+  sysopen -w -o creat,excl -u rfd -- "$rec" 2>/dev/null || return 1
+  zsh -c 'lib=$1 rec=$2 lockfd=$3; shift 3
+          [[ -n "$lockfd" ]] && exec {lockfd}>&-
+          source "$lib" && zmodload -F zsh/stat b:zstat && start=$(proc_start $$) && [[ -n "$start" ]] \
+            && print -r -- "$$ $start" >&3 && [[ "$(zstat +inode -f 3)" == "$(zstat +inode -- "$rec" 2>/dev/null)" ]] \
+            && exec 3>&- && exec "$@"
+          print -u2 -r -- "kdevm: could not record this process and its start time in $rec; not started: $1"; exit 1' \
+    kdevm-launch "$KDEVM_LIB" "$rec" "${KDEVM_LOCK_FD:-}" "$@" </dev/null >>"$logf" 2>&1 3>&$rfd {rfd}>&- &
+  exec {rfd}>&-
+}
+
+# stop_tracked RECORD PATTERN LABEL [kill]: end the process RECORD vouches for.
+# Every signal is sent only after the record has been checked against the
+# live process (command line and start time), immediately before it:
+#   running -> SIGTERM, wait; with "kill", SIGKILL if it is still ours, wait;
+#   absent  -> nothing to signal;
+#   unknown -> nothing is signalled.
+# The record is removed only once the process is confirmed gone (or was
+# never ours). Returns 1, record kept, if it could not be verified or did
+# not end.
+stop_tracked() { # record, pattern, label, [kill]
+  local rec=$1 pat=$2 label=$3 PF_PID PF_START i
+  read_pidfile "$rec" || { rm -f "$rec" 2>/dev/null || true; return 0; }   # empty or unreadable: nothing was ever registered
+  case "$(pid_state "$PF_PID" "$PF_START" "$pat")" in
+    absent)  rm -f "$rec"; return 0 ;;
+    unknown) log "$label pid $PF_PID could not be verified (process inspection failed); not signalled, tracking preserved"; return 1 ;;
+  esac
+  kill "$PF_PID" 2>/dev/null || true
+  for i in {1..25}; do [[ "$(pid_state "$PF_PID" "$PF_START" "$pat")" == absent ]] && break; sleep 0.2; done
+  if [[ "${4:-}" == kill && "$(pid_state "$PF_PID" "$PF_START" "$pat")" == running ]]; then
+    kill -9 "$PF_PID" 2>/dev/null || true
+    for i in {1..25}; do [[ "$(pid_state "$PF_PID" "$PF_START" "$pat")" == absent ]] && break; sleep 0.2; done
+  fi
+  if [[ "$(pid_state "$PF_PID" "$PF_START" "$pat")" != absent ]]; then
+    log "$label pid $PF_PID did not exit after ${${4:+SIGTERM and SIGKILL}:-SIGTERM}; tracking preserved"; return 1
+  fi
+  rm -f "$rec"
 }
 
 # ---- lock ------------------------------------------------------------------

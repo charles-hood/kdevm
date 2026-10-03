@@ -473,7 +473,7 @@ the kernel object that holds the fact.
 | 3 | `up` SIGKILLed between starting a helper and recording it left an untracked helper | the helper registers itself: a launcher zsh writes its own pid and start time to the record, then `exec`s the helper (same pid, same start time). No window, no record means no helper |
 | 4 | when a helper's start time could not be read, `up` sent TERM to a bare pid and assumed it worked | gone with 3: that branch does not exist; the launcher simply does not exec |
 | 6 | a SIGKILLed `runtime/build.sh` released its locks while its compilers ran on | `take_tree_lock`: `flock(2)` on a descriptor the build's children inherit, so the kernel keeps the lock until the last of them ends |
-| 5 | records left by 0.1.0 (`clipboard-bridge.pid`) are ignored even if a process behind them was frozen by hand and still exists | not fixed, proposed out of scope: it needs a helper stopped with SIGSTOP under 0.1.0 before the update, and what it leaves is two idle processes with no disk and no socket. A running 0.1.0 VM is covered by 1 |
+| 5 | records left by 0.1.0 (`clipboard-bridge.pid`) are ignored even if a process behind them was frozen by hand and still exists | not fixed, out of scope by Charles's decision: it needs a helper stopped with SIGSTOP under 0.1.0 before the update, and what it leaves is two idle processes with no disk and no socket. A running 0.1.0 VM is covered by 1 |
 
 - `qemu-io -c "sleep N" image` holds an image exactly as a running QEMU
   does; the offline checks use it as the lock holder.
@@ -484,6 +484,34 @@ the kernel object that holds the fact.
   inherited the descriptor has ended (checked in a scratch directory before
   it went into the builder). `zsystem flock` is `fcntl`, which belongs to
   one process: right for the lifecycle lock, wrong for a build.
+
+## 0.2.0 review, closure pass one (Codex, commit bde8dd5)
+
+NOT CLEAN: eleven of twenty-two rubric items not met, two regressions. Five
+of the eleven were 0.1.0 code that the rubric, written as blanket promises
+("never signals...", "status writes nothing"), now covered.
+
+| item | what was wrong | what changed |
+|---|---|---|
+| R1 (regression) | a launcher delayed past its session could overwrite a newer helper's record | `launch_tracked`: `up` opens the record file and hands the launcher the descriptor; a late write lands in the old, unlinked file, and the launcher does not exec once the path is no longer its file |
+| R3 | `down` sent SIGKILL to a bare pid two seconds after SIGTERM; `up` signalled a QEMU it had no record for | `stop_tracked` is the only code that signals; identity is checked immediately before every signal. QEMU is started with `launch_tracked` too, so the record-less branch is gone |
+| R4, R7 | a forced stop dropped QEMU's record without confirming the exit, and `destroy`/`rebuild` then removed its disks; UNKNOWN made `down` exit 1 | the record goes only when the exit is confirmed; otherwise `down` exits 2 and nothing is removed; `destroy` and `rebuild` also check the image lock again before `rm`; UNKNOWN exits 2 |
+| R6 | `status`'s ssh call could add the guest key to `known_hosts` | `UserKnownHostsFile=/dev/null`, given first (ssh keeps the first value of an option) |
+| R8 | `down` left a crashed QEMU's sockets | removed in the not-running branch |
+| R10 | the Cocoa rename was a `sed` nobody checked | checked after the edit, like the helper's |
+| R13 | after an overlong line the receiver read the rest of it as a new message | it drops everything up to that line's newline |
+| R14 | a password of `@@SSHKEY@@` was expanded by the next replacement | the renderer makes one `re.sub` pass over the template; output for ordinary values is byte-identical to before (67,779 bytes compared) |
+| R19 | the factory fixtures called real `ssh` | `ssh` and `nc` are failing stubs first in `PATH` for the whole suite |
+| R20 | no check exercised the receiver's loop | the loop runs against a file and a fake `timedatectl`; the factory's remote checks still run only in a real build (stated as a limit) |
+| regression | the new lock test looked for an orphaned `sleep 30` to kill and could have matched somebody else's | the holder script leaves nothing behind to hunt for |
+
+- zsh: `exec {fd}>file` inside a brace group that has its own redirection
+  (`{ exec {fd}>f } 2>/dev/null`) makes that redirection stick for the rest
+  of the function, and a later launch from the same shell silently did not
+  happen. `sysopen` (zsh/system) opens a descriptor without `exec`.
+- Seen on the real VM after the change: QEMU's record is written by its own
+  launcher (same pid and start time after `exec`), three helpers the same
+  way, `down` clean, no record or socket left.
 
 ## Rules that are easy to forget
 

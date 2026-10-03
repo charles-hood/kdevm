@@ -70,6 +70,7 @@ git -C "$SRC" clean -qfd -e .build -e macos/.build
 echo "== rebrand the product-identity patch: Try Omarchy -> kdevm"
 PATCH="$SRC/macos/patches/qemu-cocoa-product-identity.patch"
 sed -i '' 's/Try Omarchy/kdevm/g' "$PATCH"
+grep -q 'setProcessName:@"kdevm"' "$PATCH" && ! grep -q 'Try Omarchy' "$PATCH" || { echo "could not rebrand the product name in $PATCH (upstream's text has moved)" >&2; exit 1; }
 NEWSHA=$(shasum -a 256 "$PATCH" | awk '{print $1}')
 sed -i '' "s/^identity_patch_sha256=.*/identity_patch_sha256=$NEWSHA/" "$SRC/macos/build-qemu-gpu-runtime.sh"
 grep -q "^identity_patch_sha256=$NEWSHA" "$SRC/macos/build-qemu-gpu-runtime.sh" || { echo "could not pin the rebranded patch hash" >&2; exit 1; }
