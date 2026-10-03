@@ -112,11 +112,14 @@ log "booting headless for provisioning (serial: $SERIAL)"
   -device virtio-blk-pci,drive=root \
   -drive if=none,id=seed,file="$STATE/seed.iso",format=raw,readonly=on \
   -device virtio-blk-pci,drive=seed \
-  -netdev user,id=net,hostfwd=tcp:127.0.0.1:$SSH_PORT-:22 -device virtio-net-pci,netdev=net \
+  -netdev user,id=net,hostfwd=tcp:127.0.0.1:$SSH_PORT-:22 -device virtio-net-pci,netdev=net,romfile= \
   -object rng-random,id=rng,filename=/dev/urandom -device virtio-rng-pci,rng=rng \
   -display none -serial "file:$SERIAL" -monitor none &
+# romfile= : the runtime ships no option ROMs (no share/qemu), and the guest
+# boots from UEFI + disk, so no device needs one (try-omarchy does the same).
 QPID=$!
-trap 'kill $QPID 2>/dev/null; rm -f "$WORK" "$PROV_VARS"' EXIT
+# On any failure after boot, keep the disk for inspection as factory.qcow2.failed.
+trap 'kill $QPID 2>/dev/null; sleep 1; mv -f "$WORK" "$FACTORY.failed" 2>/dev/null; rm -f "$PROV_VARS"' EXIT
 
 # ---- 5. wait for ssh, then for cloud-init -----------------------------------
 log "waiting for ssh on localhost:$SSH_PORT"
@@ -127,9 +130,21 @@ for i in {1..120}; do
 done
 ssh "${SSH_OPTS[@]}" "$USER_NAME@localhost" true || die "ssh never answered; see $SERIAL"
 log "ssh up after $(( $(date +%s) - t0 )) s; waiting for cloud-init (apt over the WAN, several minutes)"
-ssh "${SSH_OPTS[@]}" "$USER_NAME@localhost" 'sudo cloud-init status --wait --long' || {
-  ssh "${SSH_OPTS[@]}" "$USER_NAME@localhost" 'sudo tail -40 /var/log/cloud-init-output.log' || true
-  die "cloud-init reported an error"
+# cloud-init status exits 0 (done), 2 (done with warnings: "degraded"), 1 (error).
+CI_RC=0
+ssh "${SSH_OPTS[@]}" "$USER_NAME@localhost" 'sudo cloud-init status --wait --long' || CI_RC=$?
+if [[ $CI_RC -eq 2 ]]; then
+  echo "cloud-init finished DEGRADED (warnings above); continuing, the checks below decide"
+elif [[ $CI_RC -ne 0 ]]; then
+  true
+fi
+[[ $CI_RC -eq 0 || $CI_RC -eq 2 ]] || {
+  # Keep the evidence on the host: the whole cloud-init output, plus the apt
+  # error lines up front. The half-built disk is kept too (factory.qcow2.failed).
+  ssh "${SSH_OPTS[@]}" "$USER_NAME@localhost" 'sudo cat /var/log/cloud-init-output.log' > "$STATE/cloud-init-output.log" 2>/dev/null || true
+  echo "---- apt/dpkg errors (full log: $STATE/cloud-init-output.log):"
+  grep -E '^(E:|W:|dpkg:|Err:)|Unable to locate|no installation candidate|unmet dependencies|not going to be installed|Depends:' "$STATE/cloud-init-output.log" | grep -v '^\.' | head -40
+  die "cloud-init reported an error (disk kept at $FACTORY.failed)"
 }
 t1=$(date +%s)
 log "cloud-init done at $((t1 - t0)) s"
@@ -138,11 +153,16 @@ log "cloud-init done at $((t1 - t0)) s"
 log "kernel capability checks"
 CHECKS=$(ssh "${SSH_OPTS[@]}" "$USER_NAME@localhost" 'bash -s' <<'EOF'
 set -u
-cfg=/boot/config-$(uname -r)
+# Check the NEWEST installed kernel (package_upgrade may have installed one
+# the factory will boot next time), not necessarily the running one. Full
+# path to modinfo: a non-root ssh PATH on Debian lacks /usr/sbin.
+krel=$(ls -1 /lib/modules | sort -V | tail -1)
+cfg=/boot/config-$krel
+echo "checking kernel $krel (running: $(uname -r))"
 fail=0
 has() { # module name, CONFIG symbol
-  if modinfo -n "$1" >/dev/null 2>&1; then echo "ok   $1 (module)"
-  elif grep -q "^$2=y" "$cfg" 2>/dev/null; then echo "ok   $1 (built-in $2)"
+  if /usr/sbin/modinfo -k "$krel" -n "$1" >/dev/null 2>&1; then echo "ok   $1 (module)"
+  elif grep -q -E "^$2=(y|m)" "$cfg" 2>/dev/null; then echo "ok   $1 ($2=$(grep -E "^$2=" "$cfg" | cut -d= -f2))"
   else echo "FAIL $1 ($2 absent)"; fail=1; fi
 }
 has virtio_gpu     CONFIG_DRM_VIRTIO_GPU
@@ -160,7 +180,7 @@ if grep -q '^CONFIG_PAGE_REPORTING=y' "$cfg"; then echo "ok   free-page reportin
 echo "sessions wayland: $(ls /usr/share/wayland-sessions 2>/dev/null | tr '\n' ' ')"
 echo "sessions x11:     $(ls /usr/share/xsessions 2>/dev/null | tr '\n' ' ')"
 ls /usr/share/wayland-sessions/plasma.desktop >/dev/null 2>&1 || { echo "FAIL plasma.desktop wayland session missing"; fail=1; }
-echo "kernel:  $(uname -r)"
+echo "kernel:  $krel"
 echo "mesa:    $(dpkg-query -W -f='${Version}' libgl1-mesa-dri 2>/dev/null)"
 echo "kwin:    $(dpkg-query -W -f='${Version}' kwin-wayland 2>/dev/null)"
 echo "plasma:  $(dpkg-query -W -f='${Version}' plasma-workspace 2>/dev/null)"
@@ -171,7 +191,7 @@ exit $fail
 EOF
 ) && CHECK_RC=0 || CHECK_RC=$?
 echo "$CHECKS"
-[[ $CHECK_RC -eq 0 ]] || die "kernel capability checks failed; factory NOT produced"
+[[ $CHECK_RC -eq 0 ]] || die "kernel capability checks failed; factory NOT produced (disk kept at $FACTORY.failed)"
 
 {
   echo "factory built: $(date -u +%Y-%m-%dT%H:%M:%SZ)"

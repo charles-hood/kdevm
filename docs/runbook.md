@@ -53,7 +53,46 @@ fact was established on the M4 Pro.
 
 ## Phase 1: factory
 
-(pending)
+Gotchas met on the way (2026-10-02):
+
+- The runtime has no `share/qemu`, so any PCI device whose class defaults an
+  option ROM (`virtio-net-pci` wants `efi-virtio.rom`) fails at start with
+  "failed to find romfile". try-omarchy's launcher puts `romfile=` on every
+  PCI device; kdevm does the same. UEFI boots from disk, nothing needs a ROM.
+- `guest/build.sh` refuses to boot if any `@@` token survives rendering. The
+  first run tripped on the template's own header comment, which named the
+  token syntax. Rendering is done by Python with literal replacement, not
+  sed, so a password containing `&` or `|` cannot corrupt the YAML.
+- The provisioning boot under HVF reaches the initramfs in well under a
+  second of guest time and answers ssh 16 s after launch; GROWROOT extends
+  `/dev/vda1` to the 40 GB disk on the first boot (cloud-init growpart).
+- cloud-init `users: groups:` must name only groups that exist in the image.
+  `netdev` did not, cloud-init created it as a regular group, and
+  NetworkManager's postinst (pulled in by plasma-nm) aborted with "The group
+  `netdev' already exists and is not a system group" (exit 13), which failed
+  the whole apt transaction. Groups are now `sudo render video audio users`.
+- The first full run installed Recommends (fonts-noto-cjk, libvlc, sshfs,
+  vulkan-tools...). Switched to `APT::Install-Recommends "false"` like the
+  container, with the wanted Recommends listed explicitly (qt6-wayland,
+  dbus-user-session, kio-extras, xdg-desktop-portal-kde, polkit-kde-agent-1,
+  kde-spectacle).
+- `cloud-init status --wait` exits 2 for "degraded" (done, with warnings),
+  which the script first read as failure. The one warning was `lock_passwd:
+  false` without a password in the `users:` entry (the password came from a
+  separate `chpasswd:` block); `plain_text_passwd` in the entry fixes it.
+- The kernel checks first reported every module absent on a VM that was
+  plainly running on virtio-blk and virtio-net: a non-root ssh session's
+  PATH on Debian 13 has no `/usr/sbin`, so `modinfo` was not found and the
+  fallback accepted only `=y`. The check now calls `/usr/sbin/modinfo -k`
+  against the newest installed kernel (package_upgrade may install one the
+  factory boots next) and accepts `=m` or `=y` from `/boot/config-*`.
+- With no Recommends the whole cloud-init run (apt update, dist-upgrade,
+  Plasma, both browsers) takes about **95 s** of guest time.
+- On a cloud-init failure `guest/build.sh` now copies the whole
+  `cloud-init-output.log` to `~/.cache/kdevm/`, prints the apt and dpkg error
+  lines, and keeps the half-built disk as `factory.qcow2.failed`.
+
+(results pending)
 
 ## Phase 1.5: graphics preflight
 

@@ -39,8 +39,9 @@ FULLSCREEN="${KDEVM_FULLSCREEN:-off}"
 FACTORY="$STATE/factory.qcow2"
 WORK="$STATE/work.qcow2"
 EFIVARS="$STATE/efivars.fd"
-QMP="$STATE/qmp.sock"
-CLIP="$STATE/clipboard.sock"
+RUN="$STATE/run"                 # mode 0700: the helper refuses sockets in a shared dir
+QMP="$RUN/qmp.sock"
+CLIP="$RUN/clipboard.sock"
 SERIAL="$STATE/serial.log"
 PIDFILE="$STATE/qemu.pid"
 BRIDGEPID="$STATE/clipboard-bridge.pid"
@@ -70,10 +71,44 @@ for line in f:
 PY
 }
 
-# Scale hint for the guest: auto = 2 on a Retina main display, 1 otherwise.
+# Main display pixel size "W H" (1920 1080 if unreadable). The initial
+# virtio-gpu mode is set to it so the first window opens near full size
+# (Cocoa sizes the window in points = pixels / scale, then zoom-to-fit keeps
+# it on screen); without this the first window came up at 492x277 points.
+display_pixels() {
+  system_profiler -json SPDisplaysDataType 2>/dev/null | python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+    for g in d["SPDisplaysDataType"]:
+        for disp in g.get("spdisplays_ndrvs", []):
+            if disp.get("spdisplays_main") == "spdisplays_yes":
+                w, h = disp["_spdisplays_pixels"].replace(" ", "").split("x"); print(w, h); raise SystemExit
+except Exception:
+    pass
+print("1920 1080")'
+}
+
+# Scale hint for the guest. The Cocoa dynamic-display patch publishes the
+# window's BACKING-pixel size, so on a 2x display (Retina, or a 4K panel run
+# at 1920x1080 points like the M32UC) the guest needs scale 2 to look normal.
+# auto = pixels / points of the main display, rounded; KDEVM_SCALE overrides.
 scale_hint() {
   case "${KDEVM_SCALE:-auto}" in
-    auto) system_profiler SPDisplaysDataType 2>/dev/null | grep -q -i retina && echo 2 || echo 1 ;;
+    auto)
+      system_profiler -json SPDisplaysDataType 2>/dev/null | python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+    for g in d["SPDisplaysDataType"]:
+        for disp in g.get("spdisplays_ndrvs", []):
+            if disp.get("spdisplays_main") == "spdisplays_yes":
+                px = int(disp["_spdisplays_pixels"].split("x")[0])
+                pt = int(disp["_spdisplays_resolution"].split("x")[0])
+                print(2 if px >= pt * 1.5 else 1); raise SystemExit
+except Exception:
+    pass
+print(1)' ;;
     *) echo "$KDEVM_SCALE" ;;
   esac
 }
@@ -84,36 +119,41 @@ ensure_factory() { [[ -f "$FACTORY" ]] || { log "factory missing; building (abou
 up() {
   ensure_runtime; ensure_factory
   if running; then log "already running (pid $(qemu_pid))"; return 0; fi
-  mkdir -p "$STATE" "$SHARE"
+  mkdir -p "$STATE" "$SHARE"; install -d -m 700 "$RUN"
   [[ -f "$WORK" ]] || { log "new overlay on the factory"; "$QEMU_IMG" create -q -f qcow2 -b "$FACTORY" -F qcow2 "$WORK"; }
   # Private UEFI variable store: a copy of the template, never the template.
   [[ -f "$EFIVARS" ]] || cp "$FW_VARS_TEMPLATE" "$EFIVARS"
   rm -f "$QMP" "$CLIP"
-  local out_hz in_hz scale
+  # The helper's bridges accept only a socket owned by this uid with no
+  # group/other bits (NativeBridgeSocket.swift), so QEMU must create them
+  # under a private umask. Everything else it writes becomes private too.
+  umask 077
+  local out_hz in_hz scale xres yres
+  read -r xres yres < <(display_pixels)
   out_hz=$("$HELPER" --host-audio-frequency output 2>/dev/null || echo 48000)
   in_hz=$("$HELPER" --host-audio-frequency input 2>/dev/null || echo 48000)
   scale=$(scale_hint)
-  log "starting: $CPUS vCPU, ${MEM_MB} MB, scale hint $scale, audio ${out_hz}/${in_hz} Hz, share $SHARE"
-  # gic-version=3 is mandatory on this QEMU under HVF. --shm-size's analogue
-  # is not needed: a VM has its own /dev/shm.
-  "$QEMU" \
+  log "starting: $CPUS vCPU, ${MEM_MB} MB, initial mode ${xres}x${yres}, scale hint $scale, audio ${out_hz}/${in_hz} Hz, share $SHARE"
+  # gic-version=3 is mandatory on this QEMU under HVF. romfile= on every PCI
+  # device: the runtime ships no option ROMs and UEFI boots from disk anyway.
+  "$QEMU" -name kdevm \
     -machine virt,accel=hvf,gic-version=3 -cpu host,pmu=off \
     -smp "$CPUS,sockets=1,cores=$CPUS,threads=1" -m "${MEM_MB}M" -nodefaults \
     -drive if=pflash,format=raw,readonly=on,file="$FW_CODE" \
     -drive if=pflash,format=raw,file="$EFIVARS" \
     -drive if=none,id=root,file="$WORK",format=qcow2,cache=writeback \
-    -device virtio-blk-pci,drive=root \
-    -device virtio-gpu-gl-pci,max_outputs=1,xres=1920,yres=1080 \
+    -device virtio-blk-pci,drive=root,romfile= \
+    -device "virtio-gpu-gl-pci,max_outputs=1,xres=$xres,yres=$yres,romfile=" \
     -display "cocoa,gl=on,show-cursor=on,zoom-to-fit=on,full-screen=$FULLSCREEN,full-grab=on,immersive=off,swap-opt-cmd=off" \
-    -device virtio-keyboard-pci -device virtio-tablet-pci -device virtio-pinch-pci \
+    -device virtio-keyboard-pci,romfile= -device virtio-tablet-pci,romfile= -device virtio-pinch-pci,romfile= \
     -audiodev "sdl,id=snd,timer-period=1000,out.buffer-count=8,out.frequency=$out_hz,in.frequency=$in_hz" \
     -device intel-hda -device hda-micro,audiodev=snd \
-    -netdev "user,id=net,hostfwd=tcp:127.0.0.1:$SSH_PORT-:22" -device virtio-net-pci,netdev=net \
+    -netdev "user,id=net,hostfwd=tcp:127.0.0.1:$SSH_PORT-:22" -device virtio-net-pci,netdev=net,romfile= \
     -object rng-random,id=rng,filename=/dev/urandom -device virtio-rng-pci,rng=rng \
     -device virtio-balloon-pci,free-page-reporting=on \
     -fsdev "local,id=share,path=$SHARE,security_model=none,guest_owner_uid=1000,guest_owner_gid=1000" \
-    -device virtio-9p-pci,fsdev=share,mount_tag=mac \
-    -device virtio-serial-pci,id=vser \
+    -device virtio-9p-pci,fsdev=share,mount_tag=mac,romfile= \
+    -device virtio-serial-pci,id=vser,romfile= \
     -chardev "socket,id=clip,path=$CLIP,server=on,wait=off" \
     -device virtserialport,bus=vser.0,nr=2,chardev=clip,name=dev.tryomarchy.clipboard \
     -fw_cfg "name=opt/kdevm/scale,string=$scale" \
@@ -123,10 +163,12 @@ up() {
   local pid=$!
   for i in {1..100}; do [[ -S "$QMP" && -S "$CLIP" ]] && break; kill -0 $pid 2>/dev/null || { cat "$STATE/qemu.out" >&2; die "QEMU exited at start"; }; sleep 0.1; done
   # Clipboard bridge: their helper, supervised while QEMU lives (as their launcher does).
+  # The subshell's own stdio is detached too: an inherited pipe (tee, a
+  # caller's $(...)) would otherwise stay open until QEMU exits.
   ( while kill -0 $pid 2>/dev/null; do
       "$HELPER" --bridge-native-clipboard "$pid" "$CLIP" >>"$STATE/clipboard-bridge.log" 2>&1 || true
       kill -0 $pid 2>/dev/null && sleep 1
-    done ) &
+    done ) </dev/null >/dev/null 2>&1 &
   echo $! > "$BRIDGEPID"
   disown 2>/dev/null || true
   log "up: pid $pid, window open; ssh with: kdevm.sh ssh"
@@ -135,10 +177,18 @@ up() {
 down() {
   running || { log "not running"; return 0; }
   local pid; pid=$(qemu_pid)
-  log "power-off via QMP"
-  qmp system_powerdown >/dev/null 2>&1 || true
-  for i in {1..30}; do kill -0 "$pid" 2>/dev/null || break; sleep 1; done
-  if kill -0 "$pid" 2>/dev/null; then log "guest did not power off in 30 s; terminating"; kill "$pid"; sleep 2; kill -9 "$pid" 2>/dev/null || true; fi
+  # Plasma's power manager owns the ACPI power button and does not shut down
+  # on it (seen 2026-10-02: QMP system_powerdown, 30 s, nothing), so ask the
+  # guest's systemd over ssh first; QMP powerdown is the fallback for a guest
+  # without ssh; a kill is the last resort.
+  if ssh "${SSH_OPTS[@]}" -o BatchMode=yes "$USER_NAME@localhost" 'sudo systemctl poweroff' >/dev/null 2>&1; then
+    log "power-off via ssh (systemctl poweroff)"
+  else
+    log "ssh not answering; power-off via QMP"
+    qmp system_powerdown >/dev/null 2>&1 || true
+  fi
+  for i in {1..45}; do kill -0 "$pid" 2>/dev/null || break; sleep 1; done
+  if kill -0 "$pid" 2>/dev/null; then log "guest did not power off in 45 s; terminating"; kill "$pid"; sleep 2; kill -9 "$pid" 2>/dev/null || true; fi
   [[ -f "$BRIDGEPID" ]] && { kill "$(cat "$BRIDGEPID")" 2>/dev/null || true; }
   rm -f "$PIDFILE" "$BRIDGEPID" "$QMP" "$CLIP"
   log "stopped (overlay kept; 'up' resumes it)"
@@ -200,7 +250,7 @@ status() {
     if nc -z -G 2 localhost "$SSH_PORT" 2>/dev/null; then
       echo "-- ssh: localhost:$SSH_PORT answering"
       ssh "${SSH_OPTS[@]}" -o BatchMode=yes "$USER_NAME@localhost" \
-        'echo "-- guest: $(uname -r), session $(loginctl show-session $(loginctl list-sessions --no-legend | awk "\$3==\"'"$USER_NAME"'\"{print \$1; exit}") -p Type --value 2>/dev/null || echo unknown), uptime $(uptime -p)"' 2>/dev/null || echo "-- guest: ssh not accepting the key yet"
+        'echo "-- guest: $(uname -r), seat session $(loginctl show-session $(loginctl list-sessions --no-legend | awk "\$4==\"seat0\"{print \$1; exit}") -p Type --value 2>/dev/null || echo none), uptime $(uptime -p)"' 2>/dev/null || echo "-- guest: ssh not accepting the key yet"
     else echo "-- ssh: localhost:$SSH_PORT not answering"; fi
   else echo "-- qemu: not running"; fi
 }
