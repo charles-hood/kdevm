@@ -72,6 +72,8 @@ lock holder, and a SIGKILLed factory build).
   WebGL; sound out and microphone in; clipboard text and PNG both ways;
   shared folder; ssh. Factory build about 110 s, boot to desktop 14 s, idle
   about 7% of one core, unused guest memory returned to macOS.
+- Cocoa display runs with `show-cursor=off`: with it on, the Mac cursor sat
+  on top of Plasma's own cursor as a double cursor.
 - Known limits: local only; no hardware video decode (CPU decode); a
   rebuilt runtime has a new ad-hoc signature and macOS re-asks the
   microphone permission; guest sudo is passwordless by default.

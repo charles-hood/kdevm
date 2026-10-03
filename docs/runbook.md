@@ -195,6 +195,30 @@ Live: `kdevm.sh rebuild` on the real state built the factory in-process in
 130 s (ssh at 17 s, cloud-init 126 s) and `up` came back tracked with QMP
 answering (2026-10-03 00:31).
 
+## Double cursor (2026-10-03, Charles)
+
+Charles saw the Mac cursor and Plasma's cursor superimposed, moving
+together. Cause: `-display cocoa,...,show-cursor=on` forces the host cursor
+visible over the guest view while Plasma already draws its own cursor into
+the scanout. A capture with the host-cursor overlay showed the black macOS
+arrow on top of the white Breeze arrow. Fix: `show-cursor=off` (the Cocoa
+frontend then hides the host cursor over the view and shows it again
+outside). Host-driven tests after the change, with a small CoreGraphics
+tool (`scratchpad/mouse`, not in the repo) and an evdev counter in the guest:
+
+| test | result |
+|---|---|
+| inside the window | one arrow; captures with and without the host-cursor overlay differ in 0 of 230400 pixels, so it is the guest's Breeze cursor in the scanout |
+| leave the window | the Mac cursor is visible at the pointer; the guest cursor stays parked where the pointer left (normal for a VM) |
+| re-enter | one arrow again |
+| motion | 80 injected steps: 99 ABS_X and 104 ABS_Y events on the virtio tablet; idle control: no events |
+| two-finger scroll | 60 continuous scroll events: 60 REL_WHEEL_HI_RES and 5 legacy REL_WHEEL on the tablet; nothing on the pinch device |
+| resize | 1614x908 to 1299x731 logical (2598x1462 pixels) through the EDID, as before |
+| pinch | not synthesisable from a script (NSEvent magnification); Charles's check |
+
+The guest cursor was not hidden or customised; the normal QEMU cursor path
+works.
+
 ## Rules that are easy to forget
 
 - `gic-version=3` is mandatory under HVF on this QEMU; it rejects GICv2.

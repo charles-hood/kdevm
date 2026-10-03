@@ -155,6 +155,10 @@ up() {
   log "starting: $CPUS vCPU, ${MEM_MB} MB, initial mode ${xres}x${yres}, scale hint $scale, audio ${out_hz}/${in_hz} Hz, share $SHARE"
   # gic-version=3 is mandatory on this QEMU under HVF. romfile= on every PCI
   # device: the runtime ships no option ROMs and UEFI boots from disk anyway.
+  # show-cursor=off: Plasma draws the guest cursor into the scanout; with
+  # show-cursor=on the Mac cursor stayed visible on top of it and the two
+  # moved together as a double cursor (seen 2026-10-03). The Cocoa frontend
+  # hides the host cursor while the pointer is over the guest view.
   "$QEMU" -name kdevm \
     -machine virt,accel=hvf,gic-version=3 -cpu host,pmu=off \
     -smp "$CPUS,sockets=1,cores=$CPUS,threads=1" -m "${MEM_MB}M" -nodefaults \
@@ -163,7 +167,7 @@ up() {
     -drive if=none,id=root,file="$WORK",format=qcow2,cache=writeback \
     -device virtio-blk-pci,drive=root,romfile= \
     -device "virtio-gpu-gl-pci,max_outputs=1,xres=$xres,yres=$yres,romfile=" \
-    -display "cocoa,gl=on,show-cursor=on,zoom-to-fit=on,full-screen=$FULLSCREEN,full-grab=on,immersive=off,swap-opt-cmd=off" \
+    -display "cocoa,gl=on,show-cursor=off,zoom-to-fit=on,full-screen=$FULLSCREEN,full-grab=on,immersive=off,swap-opt-cmd=off" \
     -device virtio-keyboard-pci,romfile= -device virtio-tablet-pci,romfile= -device virtio-pinch-pci,romfile= \
     -audiodev "sdl,id=snd,timer-period=1000,out.buffer-count=8,out.frequency=$out_hz,in.frequency=$in_hz" \
     -device intel-hda -device hda-micro,audiodev=snd \
