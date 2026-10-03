@@ -47,9 +47,14 @@ pass replaced the lock outright: it is now a kernel-managed advisory lock
 lifetime and released by the OS on exit, error, crash or SIGKILL. No owner
 metadata, no stale-lock recovery, no `unlock` verb.
 
-`tests/checks.sh` keeps every probe from all five passes runnable offline
-(29 checks, including fake `ps`, fake QMP servers, a fake QEMU, and a
-SIGKILLed lock holder).
+A sixth pass removed the last delegation: the factory build is a function
+(`guest/factory.zsh`) executed by the process that holds the lock, whether
+that is `guest/build.sh` directly or `kdevm.sh factory`, `rebuild` and a
+first-run `up`. No inherited "locked" marker exists any more.
+
+`tests/checks.sh` keeps every probe from all six passes runnable offline
+(35 checks, including fake `ps`, fake QMP servers, fake QEMUs, a SIGKILLed
+lock holder, and a SIGKILLed factory build).
 
 - Runtime: try-omarchy's patched QEMU 11.1.1 (HVF, Cocoa + VirGL, libslirp,
   SDL duplex audio, virtio-9p) built by their own script from a pinned

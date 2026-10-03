@@ -56,6 +56,9 @@ KNOWN_HOSTS="$STATE/known_hosts"
 SSH_OPTS=(-p "$SSH_PORT" -o UserKnownHostsFile="$KNOWN_HOSTS" -o StrictHostKeyChecking=no
           -o LogLevel=ERROR -o ConnectTimeout=5)
 
+source "$REPO/guest/factory.zsh"
+trap kdevm_factory_cleanup EXIT   # script scope; a no-op unless a build started
+
 QEMU_PATTERN="*${QEMU}*file=${WORK}*"
 BRIDGE_PATTERN="kdevm-bridge-supervisor *"
 # qemu_state -> running | unknown | absent (see pid_state in the library).
@@ -124,7 +127,8 @@ print(1)' ;;
 }
 
 ensure_runtime() { [[ -x "$QEMU" && -x "$HELPER" ]] || { log "runtime missing; building"; "$REPO/runtime/build.sh"; }; }
-ensure_factory() { [[ -f "$FACTORY" ]] || { log "factory missing; building (about 10 min)"; "$REPO/guest/build.sh"; }; }
+# The factory is built by THIS process (which holds the lock), never delegated.
+ensure_factory() { [[ -f "$FACTORY" ]] || { log "factory missing; building (about 2 min)"; kdevm_factory_build; }; }
 
 up() {
   ensure_runtime; ensure_factory
@@ -285,7 +289,7 @@ destroy() {
   fi
 }
 
-rebuild() { down; rm -f "$WORK" "$EFIVARS" "$KNOWN_HOSTS"; "$REPO/guest/build.sh" --force; }
+rebuild() { down; rm -f "$WORK" "$EFIVARS" "$KNOWN_HOSTS"; ensure_runtime; kdevm_factory_build --force; }
 
 ssh_guest() { ssh "${SSH_OPTS[@]}" "$USER_NAME@localhost" "$@"; }
 
@@ -340,7 +344,7 @@ status() {
 
 case "${1:-}" in
   runtime)   "$REPO/runtime/build.sh" "${@:2}" ;;
-  factory)   take_lock; ensure_runtime; "$REPO/guest/build.sh" "${@:2}" ;;
+  factory)   take_lock; ensure_runtime; kdevm_factory_build "${2:-}" ;;
   up|launch) take_lock; up ;;
   preflight) take_lock; preflight ;;
   down)      take_lock; down ;;

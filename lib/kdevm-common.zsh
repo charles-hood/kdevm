@@ -58,9 +58,9 @@ pid_state() {
 
 # ---- lock ------------------------------------------------------------------
 # One kernel-managed advisory lock per state directory (zsh/system's
-# `zsystem flock`, stock zsh on macOS), taken by every state-changing verb and
-# by the factory build (which skips it when KDEVM_LOCKED=1 says the caller
-# already holds it and will wait for it). The lock lives on an open file
+# `zsystem flock`, stock zsh on macOS), taken by every state-changing verb,
+# including the factory build, which runs as a function IN the process that
+# took the lock (guest/factory.zsh). The lock lives on an open file
 # descriptor of THIS process: the kernel releases it on normal exit, error,
 # crash or SIGKILL, and a child that inherits the descriptor does not hold it
 # (POSIX record-lock semantics, verified 2026-10-03). So there is nothing to
@@ -74,7 +74,6 @@ take_lock() {
   if ! zsystem flock -f KDEVM_LOCK_FD -t 0 "$LOCKFILE" 2>/dev/null; then
     die "another kdevm command is running on $STATE; wait for it"
   fi
-  export KDEVM_LOCKED=1
 }
 
 # ---- QMP -------------------------------------------------------------------

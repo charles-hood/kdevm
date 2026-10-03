@@ -132,18 +132,19 @@ kill "$child" 2>/dev/null
 # 5d. the lock file is private and no owner metadata exists
 [[ "$(stat -f %Lp "$T/v5/lock")" == 600 && ! -d "$T/v5/lock" ]] && pass "lock is a 0600 file, no pid metadata" || fail "lock file mode/type"
 
-# 5f. a lock-refused factory build must not touch the active build's seed
-mkdir -p "$T/v5f/lock"; sleep 120 & LH2=$!; echo $LH2 > "$T/v5f/lock/pid"; printf 'seed' > "$T/v5f/seed.iso"
+# 5f. a factory build refused by a REAL lock holder must not touch the active build's seed
+mkdir -p "$T/v5f"; printf 'seed' > "$T/v5f/seed.iso"
+KDEVM_STATE="$T/v5f" ./kdevm.sh _lockprobe 4 > /dev/null 2>&1 & LH2=$!; sleep 0.5
 out=$(KDEVM_STATE="$T/v5f" ./guest/build.sh 2>&1); rc=$?
-[[ $rc -ne 0 && -f "$T/v5f/seed.iso" ]] && pass "refused builder left the active build's seed alone" || fail "refused builder removed the seed (rc=$rc)"
-kill $LH2 2>/dev/null; wait $LH2 2>/dev/null
+[[ $rc -ne 0 && "$out" == *"another kdevm command is running"* && -f "$T/v5f/seed.iso" ]] && pass "builder refused by a live flock holder; the holder's seed untouched" || fail "refused builder (rc=$rc: $out)"
+wait $LH2 2>/dev/null
 
 # 6. private permissions (finding 6): the state dir a command creates is 0700
 [[ "$(stat -f %Lp "$T/v5")" == 700 || "$(stat -f %Lp "$T/v4")" == 700 ]] && pass "state directory created 0700" || fail "state directory mode"
 
 # 7. YAML rendering (finding 7): hostile passwords and keys survive the template
 if [[ -x .venv/bin/python ]] && .venv/bin/python -c 'import yaml' 2>/dev/null; then
-  awk "/<<'PY'\$/{f=1; next} f && /^PY\$/{exit} f" guest/build.sh > "$T/render.py"
+  awk "/<<'PY'\$/{f=1; next} f && /^PY\$/{exit} f" guest/factory.zsh > "$T/render.py"
   V=guest/vendor; ok=1
   for pw in '&secret' '|secret' 'abc #secret' '12345678' 'q"uo\te' "it's" '{a: b}' '- dash' 'tab	here' ' leading space' 'üñî©ødé' '\\backslash' 'a\nb' 'pass🔑word'; do
     KDEVM_USER_NAME=tester KDEVM_PASS="$pw" KDEVM_SSHKEY='ssh-ed25519 AAAATEST comment #with: odd & chars' \
@@ -235,6 +236,59 @@ EOF
   if [[ $rc -ne 0 && -z "$left" && ! -e "$T/v10/qemu.pid" && "$out" == *"start time"* ]]; then pass "launch-time start capture failure: child terminated, no pid file"; else fail "start capture failure (rc=$rc, leftover='$left')"; [[ -n "$left" ]] && kill $left 2>/dev/null; fi
 else
   echo "SKIP  failed-readiness probe (no qemu-img)"
+fi
+
+
+# 11. wrapper-driven factory execution: kdevm.sh factory runs the build in ITS
+#     OWN process while holding the lock (no delegated builder). A fake QEMU
+#     records its parent pid and whether the state lock is held, then exits.
+QI="${QEMU_IMG:-/opt/homebrew/bin/qemu-img}"
+if [[ -x "$QI" ]] && command -v mkisofs >/dev/null; then
+  F2="$T/fakert2/current/bin"; mkdir -p "$F2" "$T/v11"
+  cat > "$F2/qemu-system-aarch64" <<'EOF'
+#!/bin/zsh
+# fake provisioning QEMU: who launched me, is the lock held, then fail fast
+echo $PPID > "$KDEVM_STATE/fakeqemu.ppid"
+zmodload zsh/system
+if zsystem flock -t 0 "$KDEVM_STATE/lock" 2>/dev/null; then echo free; else echo held; fi > "$KDEVM_STATE/fakeqemu.lock"
+[[ -n "${KDEVM_FAKE_QEMU_SLEEP:-}" ]] && sleep "$KDEVM_FAKE_QEMU_SLEEP"
+exit 1
+EOF
+  chmod +x "$F2/qemu-system-aarch64"
+  "$QI" create -q -f qcow2 "$T/v11/debian-13-generic-arm64.qcow2" 1M
+  printf '%s  debian-13-generic-arm64.qcow2\n' "$(shasum -a 512 "$T/v11/debian-13-generic-arm64.qcow2" | cut -d' ' -f1)" > "$T/v11/SHA512SUMS"
+  : > "$T/v11/code.fd"; : > "$T/v11/vars.fd"
+  KDEVM_STATE="$T/v11" KDEVM_RUNTIME_ROOT="$T/fakert2" KDEVM_FW_CODE="$T/v11/code.fd" KDEVM_FW_VARS="$T/v11/vars.fd" KDEVM_SSH_PORT=2299 \
+    ./kdevm.sh factory > "$T/v11/out" 2>&1 & W=$!
+  wait $W; rc=$?
+  ppid=$(cat "$T/v11/fakeqemu.ppid" 2>/dev/null); lk=$(cat "$T/v11/fakeqemu.lock" 2>/dev/null)
+  if [[ $rc -ne 0 && "$ppid" == "$W" && "$lk" == held && "$(cat "$T/v11/out")" == *"QEMU exited during provisioning"* ]]; then pass "kdevm.sh factory: provisioning QEMU launched by the lock-holding kdevm.sh process itself (ppid $W), lock held"; else fail "wrapper-driven factory (rc=$rc ppid=$ppid wrapper=$W lock=$lk)"; fi
+  [[ -f "$T/v11/factory.qcow2.failed" && ! -e "$T/v11/seed.iso" && ! -e "$T/v11/factory.qcow2.building" ]] && pass "failed build: disk kept as .failed, seed removed" || fail "failed build cleanup"
+  # a builder process is a zsh running one of the two scripts, not any command line that mentions them
+  pgrep -f '^(/bin/)?zsh .*guest/build\.sh' >/dev/null && fail "a separate guest/build.sh process exists" || pass "no separate builder process was involved"
+
+  # 12. abnormal death of the lock-owning process during a build: nothing
+  #     continues mutating shared state, the lock is free, and a leftover
+  #     provisioning VM keeps the next factory build fail-closed.
+  rm -f "$T/v11/fakeqemu.ppid" "$T/v11/fakeqemu.lock" "$T/v11/factory.qcow2.failed"
+  KDEVM_STATE="$T/v11" KDEVM_RUNTIME_ROOT="$T/fakert2" KDEVM_FW_CODE="$T/v11/code.fd" KDEVM_FW_VARS="$T/v11/vars.fd" KDEVM_SSH_PORT=2299 KDEVM_FAKE_QEMU_SLEEP=60 \
+    ./kdevm.sh factory > "$T/v11/out2" 2>&1 & W2=$!
+  for i in {1..100}; do [[ -f "$T/v11/fakeqemu.ppid" ]] && break; sleep 0.1; done
+  kill -9 $W2; wait $W2 2>/dev/null; sleep 0.3
+  orphan=$(pgrep -f "$F2/qemu-system-aarch64" || true)
+  builders=$(pgrep -f -l '^(/bin/)?zsh .*(kdevm\.sh factory|guest/build\.sh)' || true)
+  [[ -z "$builders" ]] && pass "holder SIGKILLed mid-build: no builder process continues" || fail "a builder continued: $builders"
+  out=$(KDEVM_STATE="$T/v11" ./kdevm.sh _lockprobe 0 2>&1); rc=$?
+  [[ $rc -eq 0 && "$out" == held ]] && pass "lock free immediately after the holder's death" || fail "lock not free after SIGKILL (rc=$rc)"
+  out=$(KDEVM_STATE="$T/v11" KDEVM_RUNTIME_ROOT="$T/fakert2" KDEVM_FW_CODE="$T/v11/code.fd" KDEVM_FW_VARS="$T/v11/vars.fd" KDEVM_SSH_PORT=2299 ./kdevm.sh factory 2>&1); rc=$?
+  if [[ -n "$orphan" ]]; then
+    [[ $rc -ne 0 && "$out" == *"a kdevm VM is running"* ]] && pass "orphaned provisioning VM: next factory build refuses (fail-closed guard)" || fail "orphan guard (rc=$rc: $out)"
+    kill $orphan 2>/dev/null
+  else
+    echo "SKIP  orphan guard (fake QEMU did not outlive the holder)"
+  fi
+else
+  echo "SKIP  wrapper-driven factory probes (need qemu-img and mkisofs)"
 fi
 
 echo

@@ -113,7 +113,7 @@ every script):
 
 | | |
 |---|---|
-| the repo | `kdevm.sh`, `lib/kdevm-common.zsh` (kernel lock, process identity, QMP, config), the build scripts, the cloud-init template, vendored guest agents, `tests/checks.sh`, docs. Nothing large, nothing secret. |
+| the repo | `kdevm.sh`, `lib/kdevm-common.zsh` (kernel lock, process identity, QMP, config), `guest/factory.zsh` (the factory build as a function), the build scripts, the cloud-init template, vendored guest agents, `tests/checks.sh`, docs. Nothing large, nothing secret. |
 | `$KDEVM_RUNTIME_ROOT/<pin>/` | built QEMU + helper, `provenance.txt`, `current` symlink. Slow to rebuild, keep it. |
 | `$KDEVM_STATE/` | base image, `factory.qcow2`, `work.qcow2`, `efivars.fd`, `run/` sockets, logs. Disposable. |
 | `$KDEVM_SHARE/` | the one shared folder. An exchange folder, not a build tree. |
@@ -136,7 +136,9 @@ fw_cfg opt/kdevm/*         <-- per-launch hints (scale)                     <-- 
   builds the Swift helper with `swift build`, and stages both. The result
   is ad-hoc signed with the hypervisor entitlement. `docs/patches.md` lists
   the 23 patches and what each does.
-- **Guest.** `guest/build.sh` downloads and verifies the Debian 13 generic
+- **Guest.** `guest/factory.zsh` (run by `guest/build.sh` directly, or by
+  `kdevm.sh factory`, `rebuild` and a first-run `up`, always in the process
+  that holds the lifecycle lock) downloads and verifies the Debian 13 generic
   arm64 cloud image (the generic kernel has virtio-gpu, HDA, 9p; the cloud
   kernel does not), renders `guest/user-data.yaml.tmpl`, boots it headless
   with a NoCloud seed, waits for cloud-init, runs twelve kernel capability

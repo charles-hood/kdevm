@@ -167,6 +167,34 @@ serialise; a SIGKILLed holder is followed by an immediate successful
 acquisition with nothing to clean; a detached child does not keep the lock;
 the lock file is 0600 with no metadata. 29 checks pass.
 
+### Sixth pass (Codex, commit 8329038): no delegated builder
+
+Codex found that `take_lock` exported only a marker (`KDEVM_LOCKED=1`), so
+the separately executed builder skipped the lock yet referenced a lock
+descriptor it never had (`KDEVM_LOCK_FD` is close-on-exec, and the variable
+was not exported), which broke `kdevm.sh factory`, `rebuild` and a first-run
+`up`; and that a builder trusting an inherited marker would keep mutating
+shared state after its lock-owning parent died. Charles's direction: do not
+patch the export or restore delegated ownership; make the factory a
+function run by the process that holds the lock. Done: the whole build body
+is `kdevm_factory_build` in `guest/factory.zsh`, which first asserts
+`KDEVM_LOCK_FD` is set in its own process. `guest/build.sh` is now a
+thin entry point (config, `take_lock`, call). `kdevm.sh factory`, `rebuild`
+and `ensure_factory` (first-run `up` and `preflight`) call the same function
+in-process under their own lock. `KDEVM_LOCKED` no longer exists. The
+provisioning QEMU is still launched with the lock descriptor closed.
+
+Tests: the obsolete directory/pid lock fixture is replaced by a real
+`zsystem flock` holder; a fake QEMU records its parent pid and whether the
+state lock is held when `kdevm.sh factory` launches it (parent is the
+`kdevm.sh` process, lock held, no `guest/build.sh` process involved); a
+SIGKILL of that process mid-build leaves no builder running, the lock free
+at once, and the orphaned provisioning VM makes the next factory build
+refuse through the existing "a kdevm VM is running" guard. 35 checks pass.
+Live: `kdevm.sh rebuild` on the real state built the factory in-process in
+130 s (ssh at 17 s, cloud-init 126 s) and `up` came back tracked with QMP
+answering (2026-10-03 00:31).
+
 ## Rules that are easy to forget
 
 - `gic-version=3` is mandatory under HVF on this QEMU; it rejects GICv2.
