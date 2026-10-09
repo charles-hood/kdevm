@@ -458,6 +458,22 @@ status() {
   done
 }
 
+# The `state` verb: one JSON line for Lab Launcher and other dashboards
+# (contract v1, ~/Projects/home-network/docs/state-verb.md). Read-only, and
+# it never takes the lock: a lock another kdevm command holds reads as busy.
+state_verb() {
+  local s
+  if [[ -f "$STATE/lock" ]] && /usr/sbin/lsof -t -- "$STATE/lock" >/dev/null 2>&1; then s=busy
+  else
+    case "$(qemu_state)" in
+      running) s=running ;;
+      unknown) s=unknown ;;
+      *) if [[ -f "$FACTORY" || -f "$WORK" ]]; then s=stopped; else s=absent; fi ;;
+    esac
+  fi
+  printf '{"v":1,"tech":"qemu","name":"kdevm","state":"%s","mem_mb":%d}\n' "$s" "$MEM_MB"
+}
+
 case "${1:-}" in
   runtime)   "$REPO/runtime/build.sh" "${@:2}" ;;
   factory)   take_lock; kdevm_require_ssh_pub; ensure_runtime; kdevm_factory_build "${2:-}" ;;
@@ -467,11 +483,12 @@ case "${1:-}" in
   destroy)   take_lock; destroy "${2:-}" ;;
   rebuild)   take_lock; rebuild ;;
   status)    status ;;
+  state)     state_verb ;;
   ssh)       ssh_guest "${@:2}" ;;
   console)   tail -n 50 -f "$SERIAL" ;;
   # for tests/checks.sh: hold the lock for N seconds; _lockprobe_spawn also
   # leaves a detached child (inherits fds) behind and exits at once
   _lockprobe) take_lock; echo "held"; sleep "${2:-3}" ;;
   _lockprobe_spawn) take_lock; sleep 30 </dev/null >/dev/null 2>&1 & disown; echo "held $!" ;;
-  *) echo "usage: kdevm.sh {runtime|factory|up|launch|preflight|down|destroy [--all]|rebuild|status|ssh [cmd]|console}"; exit 1 ;;
+  *) echo "usage: kdevm.sh {runtime|factory|up|launch|preflight|down|destroy [--all]|rebuild|status|state|ssh [cmd]|console}"; exit 1 ;;
 esac

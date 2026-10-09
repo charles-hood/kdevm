@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- `kdevm.sh state`: the VM's state in one JSON line for dashboards
+  (`{"v":1,"tech":"qemu","name":"kdevm","state":"stopped","mem_mb":8192}`).
+  States are absent, stopped, running, busy (another kdevm command holds
+  the lock) and unknown. It is read-only, never waits on the lock and logs
+  in to nothing, so it answers at once. `status` is unchanged.
+
 ## 0.2.2 (2026-10-03)
 
 One change to a default, for Macs with little memory. No new features.

@@ -7,6 +7,7 @@
 #
 # The YAML probe needs PyYAML: python3 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
 set -uo pipefail
+zmodload zsh/datetime   # EPOCHREALTIME, for the state timing check
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO"
 KDEVM_TOOL=tests
@@ -842,6 +843,17 @@ EOF
 else
   echo "SKIP  host bridge probes (no qemu-img)"
 fi
+
+# state: one JSON line (home-network docs/state-verb.md), read-only, never waits on the lock
+out=$(KDEVM_STATE="$T/st-none" ./kdevm.sh state 2>&1)
+[[ "$out" == '{"v":1,"tech":"qemu","name":"kdevm","state":"absent","mem_mb":'*'}' && ! -e "$T/st-none" ]] && pass "state: absent on an empty state, writes nothing" || fail "state absent: $out"
+python3 -c 'import json,sys; d=json.loads(sys.argv[1]); assert d["v"]==1 and isinstance(d["mem_mb"],int)' "$out" 2>/dev/null && pass "state: the line is valid JSON with an integer mem_mb" || fail "state JSON: $out"
+mkdir -p "$T/st"; : > "$T/st/factory.qcow2"
+out=$(KDEVM_STATE="$T/st" ./kdevm.sh state 2>&1); [[ "$out" == *'"state":"stopped"'* ]] && pass "state: stopped once a factory exists" || fail "state stopped: $out"
+( KDEVM_STATE="$T/st" ./kdevm.sh _lockprobe 4 >/dev/null 2>&1 & ); sleep 0.5
+t0=$EPOCHREALTIME; out=$(KDEVM_STATE="$T/st" ./kdevm.sh state 2>&1); dt=$(( EPOCHREALTIME - t0 ))
+[[ "$out" == *'"state":"busy"'* && $dt -lt 2 ]] && pass "state: a held lock reads busy, at once ($(printf %.2f $dt) s)" || fail "state busy (dt=$dt): $out"
+sleep 4
 
 echo
 [[ $fails -eq 0 ]] && { echo "all checks passed"; exit 0; } || { echo "$fails check(s) failed"; exit 1; }

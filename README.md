@@ -99,6 +99,7 @@ problem.
 kdevm.sh up          start the desktop (builds anything missing)
 kdevm.sh down        clean power-off (your changes are kept; up resumes them)
 kdevm.sh status      what is running, and the first diagnostic command
+kdevm.sh state       the same in one JSON line, for dashboards
 kdevm.sh ssh [cmd]   ssh <user>@localhost:2222
 kdevm.sh rebuild     new factory image (fresh packages, fresh Chrome), new desktop
 kdevm.sh destroy     drop your changes (--all: the factory and base image too)
