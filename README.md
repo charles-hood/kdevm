@@ -184,18 +184,19 @@ every script):
 
 | | |
 |---|---|
-| Runtime build (QEMU + VirGL + libslirp + helper) | 96 s + 21 s |
-| Factory image build (cloud-init, Plasma, both browsers, the battery module) | about 2 minutes (102 to 137 s over nine builds), 4.3 GB on disk |
-| Boot to a logged-in desktop | 14 s |
+| Runtime build (QEMU + VirGL + libslirp + helper) | 72 s + 26 s (0.3.0, 35 patches) |
+| Factory image build (cloud-init, Plasma, both browsers, the battery module) | about 2 minutes (118 to 127 s on 0.3.0), 4.7 GB on disk |
+| Boot to a logged-in desktop | 14 s (ssh answering 14 s after launch on 0.3.0, sddm 2 s after the kernel) |
 | Clean power-off | 3 s |
 | Idle QEMU CPU | about 7% of one core (5.4% median) |
 | Charged memory at idle | 3.1 GB; a freed 2 GiB block in the guest came back to macOS within 25 s |
 | Live resize | the guest mode follows the window through the virtio-gpu EDID, no helper needed |
 
 Measured with try-omarchy's `profile-process.py`; method and provenance in
-[docs/runbook.md](docs/runbook.md). The factory row is current. Every other
-row was measured on 0.1.0, before the time zone and battery bridges and the
-power applet were added, and has not been measured again. Chrome's own `chrome://gpu` page reports
+[docs/runbook.md](docs/runbook.md). The build and boot rows are from the
+0.3.0 resync. The idle, memory and power-off rows were measured on 0.1.0,
+before the time zone and battery bridges and the power applet were added,
+and have not been measured again. Chrome's own `chrome://gpu` page reports
 native Wayland, hardware compositing, rasterization and WebGL on
 `virgl (Apple M4 Pro)`, with no GPU-process crashes.
 
