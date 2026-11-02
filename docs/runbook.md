@@ -984,8 +984,10 @@ in 199 s (cloud-init 196 s) with every 0.3.0 check passing (module 1.3.0,
 `82927e98…` and the stray `TryOmarchy.icns` beside it are still there and
 can be deleted; nothing reads them.
 
-The fourth step is `./kdevm.sh up`, typed in Terminal under Screen
-Sharing: it opens the window and the new binary's signature triggers the
-one-time microphone prompt. That `up` is also the second-machine test the
-0.3.0 release notes leave open: record its result here.
+The fourth step, `./kdevm.sh up` typed in Terminal under Screen Sharing,
+Charles ran himself at 16:49 the same day: the window opened, the new
+factory booted (overlay 209 MB after a minute, all three bridges up), and
+his verdict was "it seemed to work fine". That closes the second-machine
+test the 0.3.0 release notes left open. The old staging and the stray icon
+file beside it were deleted afterwards, on both machines.
 
