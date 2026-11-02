@@ -976,11 +976,16 @@ ssh <second-mac> 'zsh -lc "cd ~/kdevm && ./kdevm.sh rebuild"'
    three minutes there), with the 0.3.0 checks (module version,
    `arm64.nosme` in grub.cfg, GRUB on serial, getty masked).
 
+Done 2026-11-02 (evening), all three over ssh: `state` said stopped, the
+pull landed d6cec3a; `runtime` built the v1.3.0 runtime in 83 s + 22 s
+(M3 Pro, macOS 26.6.2) and moved `current`; `rebuild` built the factory
+in 199 s (cloud-init 196 s) with every 0.3.0 check passing (module 1.3.0,
+`arm64.nosme` in grub.cfg, GRUB on serial, getty masked). The old staging
+`82927e98…` and the stray `TryOmarchy.icns` beside it are still there and
+can be deleted; nothing reads them.
+
 The fourth step is `./kdevm.sh up`, typed in Terminal under Screen
 Sharing: it opens the window and the new binary's signature triggers the
-one-time microphone prompt. Afterwards the old staging
-(`~/.local/share/kdevm/runtime/82927e98…`) and the stray
-`TryOmarchy.icns` beside it can be deleted; nothing reads them. That `up`
-is also the second-machine test the 0.3.0 release notes leave open:
-record its result here.
+one-time microphone prompt. That `up` is also the second-machine test the
+0.3.0 release notes leave open: record its result here.
 
