@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.3.0 (unreleased)
+## 0.3.0 (2026-11-02)
 
 The runtime moves to try-omarchy v1.3.0: twelve new QEMU and VirGL patches,
 most of them fixes for things kdevm was exposed to, plus their current guest
