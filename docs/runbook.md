@@ -951,3 +951,36 @@ Notes:
 - Not tested there: sound, microphone, clipboard content, idle CPU (a
   desktop watched through Screen Sharing is not an idle one).
 
+### Pending: the second machine to 0.3.0
+
+As of 2026-11-02 the second machine still runs 0.2.2 plus the `state`
+verb (commit 5927851, pulled 2026-10-09): runtime 82927e98 with the old
+shared icon file beside it, a factory from 2026-10-09 (battery module
+1.2.0; no `arm64.nosme`, which an M3 Pro would not need anyway), VM
+stopped. Three of the four upgrade steps need no desktop session and can
+be run over ssh in a login shell (Homebrew is not on a non-login PATH):
+
+```
+ssh <second-mac> 'zsh -lc "cd ~/kdevm && ./kdevm.sh state && git pull"'
+ssh <second-mac> 'zsh -lc "cd ~/kdevm && ./kdevm.sh runtime"'
+ssh <second-mac> 'zsh -lc "cd ~/kdevm && ./kdevm.sh rebuild"'
+```
+
+1. `state` must say `stopped` (or `absent`) before the pull: the 0.3.0
+   scripts refuse a disk a running 0.2.2 VM still holds. The pull brings
+   the pin 13d63df8.
+2. `runtime` builds the v1.3.0 runtime beside the old staging (about two
+   minutes on the M3 Pro) and points `current` at it; `up` would do the
+   same by itself, but doing it here keeps the desktop step short.
+3. `rebuild` drops the overlay and builds the new factory headless (about
+   three minutes there), with the 0.3.0 checks (module version,
+   `arm64.nosme` in grub.cfg, GRUB on serial, getty masked).
+
+The fourth step is `./kdevm.sh up`, typed in Terminal under Screen
+Sharing: it opens the window and the new binary's signature triggers the
+one-time microphone prompt. Afterwards the old staging
+(`~/.local/share/kdevm/runtime/82927e98…`) and the stray
+`TryOmarchy.icns` beside it can be deleted; nothing reads them. That `up`
+is also the second-machine test the 0.3.0 release notes leave open:
+record its result here.
+
