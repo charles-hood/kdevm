@@ -245,6 +245,11 @@ has snd_hda_intel  CONFIG_SND_HDA_INTEL
 has qemu_fw_cfg    CONFIG_FW_CFG_SYSFS
 # the battery module is ours to build (DKMS, guest/vendor/try-omarchy-battery)
 if /usr/sbin/modinfo -k "$krel" -n try_omarchy_battery >/dev/null 2>&1; then echo "ok   try_omarchy_battery (DKMS)"; else echo "FAIL try_omarchy_battery (DKMS did not build it for $krel)"; fail=1; fi
+want=$(sed -n 's/^PACKAGE_VERSION="\(.*\)"/\1/p' /usr/src/try-omarchy-battery-*/dkms.conf | sort -V | tail -1)
+have=$(/usr/sbin/modinfo -k "$krel" -F version try_omarchy_battery 2>/dev/null)
+if [ -n "$want" ] && [ "$have" = "$want" ]; then echo "ok   try_omarchy_battery version $have"; else echo "FAIL try_omarchy_battery version: module says '$have', dkms.conf says '$want'"; fail=1; fi
+# the SME drop-in (guest/user-data.yaml.tmpl) must have reached grub.cfg: the kernel the factory boots next reads it
+if grep -q 'arm64.nosme' /boot/grub/grub.cfg; then echo "ok   arm64.nosme in grub.cfg"; else echo "FAIL arm64.nosme missing from /boot/grub/grub.cfg (update-grub did not take /etc/default/grub.d/kdevm-cpu.cfg)"; fail=1; fi
 # nothing in the guest may act on the mirrored battery, and the guest may not sleep
 if grep -qx 'CriticalPowerAction=Ignore' /etc/UPower/UPower.conf && grep -qx 'AllowRiskyCriticalPowerAction=true' /etc/UPower/UPower.conf; then echo "ok   UPower critical action: Ignore"; else echo "FAIL UPower would act on a critical battery ($(grep -E '^(CriticalPowerAction|AllowRisky)' /etc/UPower/UPower.conf | tr '\n' ' '))"; fail=1; fi
 if [ "$(busctl call org.freedesktop.login1 /org/freedesktop/login1 org.freedesktop.login1.Manager CanSuspend 2>/dev/null)" = 's "no"' ]; then echo "ok   sleep disabled (logind CanSuspend=no)"; else echo "FAIL the guest can sleep (logind CanSuspend is not no)"; fail=1; fi
@@ -259,6 +264,8 @@ echo "plasma:  $(dpkg-query -W -f='${Version}' plasma-workspace 2>/dev/null)"
 echo "chrome:  $(google-chrome --version 2>/dev/null)"
 echo "firefox: $(firefox-esr --version 2>/dev/null)"
 echo "sddm:    $(dpkg-query -W -f='${Version}' sddm 2>/dev/null)"
+# a failed build keeps its disk for inspection: flush, or the last writes are not on it
+sync
 exit $fail
 EOF
   ) && CHECK_RC=0 || CHECK_RC=$?

@@ -185,7 +185,18 @@ install_icon() {
   } always { rm -rf "$set" "$new" }
 }
 
-ensure_runtime() { [[ -x "$QEMU" && -x "$HELPER" ]] || { log "runtime missing; building"; "$REPO/runtime/build.sh"; }; }
+# The runtime is built when none is staged, and again when `current` points at
+# a pin other than runtime/pin.txt (an update moved the pin): the old staging
+# stays beside the new one, so pointing `current` back is the way back. A
+# `current` that is a plain directory names no pin and is left alone.
+runtime_pin() { tr -d '[:space:]' < "$REPO/runtime/pin.txt"; }
+runtime_staged() { local t; t="$(readlink "$RT" 2>/dev/null || true)"; print -r -- "${t:t}"; }   # a plain directory reads as empty, not as an error
+ensure_runtime() {
+  local want have; want="$(runtime_pin)"; have="$(runtime_staged)"
+  if [[ ! -x "$QEMU" || ! -x "$HELPER" ]]; then log "runtime missing; building"; "$REPO/runtime/build.sh"
+  elif [[ -n "$have" && "$have" != "$want" ]]; then log "runtime is $have; runtime/pin.txt wants $want: building (the old one stays beside it)"; "$REPO/runtime/build.sh"
+  fi
+}
 # The factory is built by THIS process (which holds the lock), never delegated.
 ensure_factory() { [[ -f "$FACTORY" ]] || { log "factory missing; building (about 2 min)"; kdevm_factory_build; }; }
 
@@ -242,6 +253,12 @@ up() {
   # earlier QEMU (gone: the checks above passed) is cleared first.
   stop_tracked "$PIDFILE" "$QEMU_PATTERN" QEMU || die "the previous QEMU record could not be cleared (kdevm.sh status); refusing to start"
   : > "$STATE/qemu.out"
+  # The runtime's Cocoa notch patch (on by default) gives a full-screen window
+  # the whole panel of a MacBook with a camera housing, relying on the guest
+  # knowing where the housing is (Omarchy's bar grows past it). Plasma has no
+  # such notion, so its panel and windows would sit under the notch: keep the
+  # strip with the menu bar, as before.
+  export TRYOMARCHY_NOTCH=0
   launch_tracked "$PIDFILE" "$STATE/qemu.out" "$QEMU" -name kdevm \
     -machine virt,accel=hvf,gic-version=3 -cpu host,pmu=off \
     -smp "$CPUS,sockets=1,cores=$CPUS,threads=1" -m "${MEM_MB}M" -nodefaults \
@@ -420,7 +437,7 @@ EOF
 }
 
 status() {
-  echo "-- runtime: $(readlink "$RT" 2>/dev/null | xargs basename 2>/dev/null || echo missing)  $( [[ -x "$QEMU" ]] && "$QEMU" --version | head -1 )"
+  echo "-- runtime: $(readlink "$RT" 2>/dev/null | xargs basename 2>/dev/null || echo missing)  $( [[ -x "$QEMU" ]] && "$QEMU" --version | head -1 )$( [[ -n "$(runtime_staged)" && "$(runtime_staged)" != "$(runtime_pin)" ]] && echo "  (runtime/pin.txt wants $(runtime_pin); the next up builds it)" )"
   if [[ -f "$FACTORY" ]]; then
     echo "-- factory: $FACTORY, $(du -h "$FACTORY" | cut -f1), built $(stat -f %Sm -t %Y-%m-%d\ %H:%M "$FACTORY")"
   else echo "-- factory: none (kdevm.sh factory)"; fi

@@ -1,12 +1,90 @@
 # Changelog
 
-## Unreleased
+## 0.3.0 (unreleased)
+
+The runtime moves to try-omarchy v1.3.0: twelve new QEMU and VirGL patches,
+most of them fixes for things kdevm was exposed to, plus their current guest
+pieces and one kernel setting for the M4. No new kdevm feature; one new
+verb (`state`).
+
+### Upgrading from 0.2.2
+
+1. Stop the VM with the version that started it (`./kdevm.sh down`), then
+   update the checkout.
+2. The next `./kdevm.sh up` rebuilds the runtime once (about two minutes).
+   The new binary has a new ad-hoc signature, so macOS asks for the
+   microphone again the first time the guest records.
+3. Run `./kdevm.sh rebuild` for the guest-side changes (the battery module,
+   the bridges' new paths, the kernel setting). It replaces the overlay.
+   The old runtime stays beside the new one under `$KDEVM_RUNTIME_ROOT`;
+   to go back, check out 0.2.2, point `current` at it, and `rebuild`.
+
+### Changed
+
+- **Runtime pinned to try-omarchy v1.3.0** (13d63df, 2026-10-24; was
+  82927e9, 2026-10-03). Same QEMU 11.1.1 source; libslirp and virglrenderer
+  are now pinned by commit upstream. `docs/patches.md` describes all 35
+  patches. The twelve new ones kdevm inherits:
+  - no App Nap: a VM whose window is hidden, minimized or behind a locked
+    screen no longer crawls at background priority;
+  - a guest rebooted while its window is small boots instead of hanging in
+    the firmware (it now gets at least 800x600);
+  - sound: the main loop runs at interactive priority, HDA output no longer
+    catches up a stall in one burst, and the Mac's audio devices are opened
+    off the main lock, so a slow microphone open (a pending permission)
+    no longer freezes the whole VM for minutes;
+  - pointer mapping per axis, a VirGL flush for the firmware console,
+    guest Super held for a whole Command chord, two-finger swipe back and
+    forward in browsers, Korean Caps Lock (inert here);
+  - notch support, which kdevm turns off (`TRYOMARCHY_NOTCH=0`): it needs a
+    guest that knows where the camera housing is, and Plasma does not.
+- **The build no longer rewrites any upstream patch.** Their product-identity
+  patch now takes the window, menu and process name from QEMU's `-name`,
+  which kdevm has always passed. The one edit to their tree is the helper
+  line that names the process its bridges attach to. The build fails closed
+  if the `-name` contract leaves the patch.
+- **Guest pieces re-vendored from v1.3.0.** Upstream moved them into an Arch
+  package; the bridges now live in `/usr/bin` (where their unit files point)
+  and the udev rules carry upstream's new names. The clipboard bridge and
+  the PipeWire drop-in are unchanged byte for byte. The battery module is
+  1.3.0: it reports the current draw (`current_now`) so UPower can estimate
+  the time left, and a host bridge that dies now drops the battery instead
+  of freezing a stale level.
+- **SME hidden from the guest** (`arm64.nosme` on the kernel command line,
+  through a GRUB drop-in). The M4 reports SME without SVE and the hypervisor
+  cannot hide it, so programs that run an SVE instruction outside streaming
+  mode (libyuv in Chromium and Electron apps) died with SIGILL. Chips before
+  the M4 have no SME, so nothing changes there. The factory build fails if
+  the setting did not reach `grub.cfg`.
+- **`up` rebuilds the runtime when `runtime/pin.txt` moves.** It used to
+  build only when no runtime was staged, so an update that moved the pin
+  left the old QEMU and helper in place. The old staging stays beside the
+  new one, and a pin that was staged earlier is pointed at again without a
+  build; `status` says when the pin and the staged runtime differ.
+- **A failed factory build flushes the guest before keeping its disk**, so
+  the `.failed` image shows what the checks saw.
+- **fedvm is named as the sister project** in the README, CONTRIBUTING and
+  the runbook: it runs this runtime and vendors the same guest files, so a
+  pin bump here is a pass there too.
+- **The time zone receiver skips the helper's wake prompt** (`{"type":
+  "wake"}`, which the v1.3.0 bridge can write on the same port) without
+  logging a rejection. kdevm does not act on it.
+
+### New
 
 - `kdevm.sh state`: the VM's state in one JSON line for dashboards
   (`{"v":1,"tech":"qemu","name":"kdevm","state":"stopped","mem_mb":8192}`).
   States are absent, stopped, running, busy (another kdevm command holds
   the lock) and unknown. It is read-only, never waits on the lock and logs
   in to nothing, so it answers at once. `status` is unchanged.
+
+### Known limits
+
+- Guest clock recovery after the Mac sleeps (upstream's v1.1.0 feature) is
+  not taken: it depends on their guest package, and no drift has been
+  reported here. The audio picker, camera, Touch ID and keyboard-language
+  integrations are still not taken.
+- Not verified on the second machine (M3 Pro) at the time of writing.
 
 ## 0.2.2 (2026-10-03)
 

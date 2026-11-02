@@ -13,10 +13,10 @@ values kept in `~/.config/kdevm/env`.
 
 | component | value |
 |---|---|
-| try-omarchy commit | 82927e98078a452ace33e527a328ef0b12a0af07 (main, 2026-10-03 UTC) |
-| QEMU | 11.1.1, gitlab commit c3d48b7d1e89604920e5b81b91140c2ad39a1943, 23 patches (`docs/patches.md`) |
-| virglrenderer | 1.3.0 source + startergo tap 1.0.42 patch set, built debugoptimized |
-| libslirp | 4.9.4 source + 2 patches (ICMP matching, IPv4 UDP translation) |
+| try-omarchy commit | 13d63df8da2947f833c04025ff5ade187d39ba81 (v1.3.0, 2026-10-24; resynced 2026-11-02). 0.1.0 to 0.2.2 ran 82927e98078a452ace33e527a328ef0b12a0af07 (main, 2026-10-03) |
+| QEMU | 11.1.1, gitlab commit c3d48b7d1e89604920e5b81b91140c2ad39a1943, 35 patches (`docs/patches.md`; 23 before the resync) |
+| virglrenderer | 1.3.0 source (commit ca50e008) + startergo tap 1.0.42 patch set (tap commit e7daef14), built debugoptimized |
+| libslirp | 4.9.4 source (commit d09dc9a7) + 2 patches (ICMP matching, IPv4 UDP translation) |
 | ANGLE / libepoxy | startergo bottles 1.0.16 / 1.0.5 (arm64_sequoia) |
 | meson / ninja | 1.9.0 / 1.13.0 (pinned downloads, not Homebrew) |
 | host | Apple M4 Pro, 14 cores, 48 GB, macOS 27.0.1 (26A434), Xcode 26 / Swift 6.4 |
@@ -44,6 +44,10 @@ values kept in `~/.config/kdevm/env`.
   (48000 / 48000) outside an app bundle.
 
 ## Branding (2026-10-02 22:43)
+
+(Historical. Since the v1.3.0 resync of 2026-11-02 upstream's patch takes the
+name from `-name`, and `runtime/build.sh` no longer rewrites any patch; see
+"Resync to try-omarchy v1.3.0".)
 
 The application menu read "About Try Omarchy / Hide Try Omarchy / Quit Try
 Omarchy" and the quit alert named it too: the Cocoa product-identity patch
@@ -341,6 +345,9 @@ What it turned up:
 
 ## Dock name (2026-10-03, Charles)
 
+(The helper-line edit described here is still applied; the patch rewrite it
+mentions ended with the v1.3.0 resync of 2026-11-02.)
+
 The Dock tooltip over the running VM read "qemu-system-aarch64". QEMU here is
 a bare executable, not an app bundle, so LaunchServices labels it with its
 file name; the product-identity patch only sets the process name and the
@@ -598,6 +605,93 @@ times. Next time the limits go into the first prompt: scope to what
 changed, bound every item, and say that contrived scenarios are notes
 unless they cost data or signal a foreign process.
 
+## Resync to try-omarchy v1.3.0 (2026-11-02)
+
+The pin moved from 82927e98 (main, 2026-10-03, v0.5.1) to 13d63df8 (v1.3.0,
+2026-10-24): about 120 upstream commits, the same QEMU 11.1.1 source, 35
+patches instead of 23 (`docs/patches.md`), libslirp and virglrenderer pinned
+by commit, and kdevm's own Cocoa fix (#312) merged upstream on 2026-10-20.
+Done beside the working 0.2.2 install, which was not touched: a git
+worktree, `KDEVM_RUNTIME_ROOT=~/Artifacts/kdevm-runtime-next`,
+`KDEVM_STATE=~/.cache/kdevm-next` (a short path: socket names are capped at
+104 bytes), `KDEVM_SSH_PORT=2223`, a share under the state directory, the
+base image and `SHA512SUMS` copied in. `kdevm.sh` finds the runtime only
+through `$KDEVM_RUNTIME_ROOT/current`, so a second root leaves the working
+`current` alone; process matching uses the literal runtime path and the
+overlay path, so the two VMs could have run at once.
+
+What changed in kdevm, and why:
+
+- `runtime/build.sh` no longer rewrites `qemu-cocoa-product-identity.patch`.
+  Upstream's patch now reads the name from QEMU's `-name` (`cocoa_product_name`),
+  which kdevm has passed since 0.1.0; the old fail-closed grep for
+  `setProcessName:@"kdevm"` would have stopped the build. The helper's
+  one-line edit (`name == "kdevm"` in `FocusedCommandSuperBridge.swift`) is
+  still needed and still applies: the helper matches the executable's file
+  name, and QEMU is staged as `bin/kdevm`. The new grep fails the build if
+  `qemu_name` leaves the patch. Provenance now records the slirp, virgl and
+  tap commits.
+- `kdevm.sh` exports `TRYOMARCHY_NOTCH=0`. The notch patch is on by default
+  and gives a full-screen window the whole panel, for a guest that knows
+  where the camera housing is; Plasma does not. QEMU's log confirms:
+  "full screen stays below the camera strip (TRYOMARCHY_NOTCH=0)".
+- Vendored guest files re-copied byte for byte from
+  `guest/package/try-omarchy/` (upstream moved them into an Arch package;
+  `guest/vendor/README.md` maps the new paths). The bridges now install in
+  `/usr/bin`, where the vendored unit files point, so the units stay
+  verbatim; the udev rules carry upstream's names
+  (`70-try-omarchy-{clipboard,battery}.rules`, the clipboard one adds
+  `TAG+="uaccess"`). The clipboard bridge and the PipeWire drop-in did not
+  change. Battery module 1.3.0 adds `current_now`; the bridge opts in with
+  `batteryCurrent` and, when the host bridge dies, now writes
+  `present=0 ac=1` instead of a stale level.
+- `arm64.nosme` on the guest kernel command line, through
+  `/etc/default/grub.d/kdevm-cpu.cfg` and `update-grub` in runcmd (Debian's
+  grub-mkconfig sources that directory). Upstream's reason (#374): the M4
+  reports SME without SVE, HVF cannot hide it, and code that runs an SVE
+  instruction outside streaming mode (libyuv in Chromium and Electron)
+  dies with SIGILL. The factory's checks fail the build if `grub.cfg` lacks
+  it, and if the module's version does not match `dkms.conf`.
+- `guest/files/kdevm-timezone` returns `None` for `{"type":"wake"}`, which
+  the v1.3.0 time zone bridge writes on the same port when the Mac posts the
+  `dev.tryomarchy.host-wake` notification (the Try Omarchy app does;
+  nothing in kdevm does). Before, each one was logged as rejected.
+- Offline checks: 7b follows the new paths and asserts the unit's
+  `ExecStart`; new 7c (clipboard pieces byte for byte) and 7d (the SME
+  drop-in, `update-grub` before the services, the factory's grep). 109
+  checks pass.
+
+Measured on the M4 Pro, macOS 27.2:
+
+| step | result |
+|---|---|
+| runtime build | 72 s QEMU/VirGL/libslirp + 26 s helper; 35 patches applied; provenance shows qemu c3d48b7d, slirp d09dc9a7, virgl ca50e008, tap e7daef14 |
+| factory build | 199 s (cloud-init 196 s); checks: `try_omarchy_battery version 1.3.0`, `arm64.nosme in grub.cfg`, all earlier ones |
+| boot | ssh answering 3 s after `up` returned; guest kernel 6.12.115+deb13.1-arm64 |
+| QEMU log | "HDA sound pacing on", "App Nap off while the VM runs", "main loop QoS: user-interactive", notch off |
+| guest cmdline | `... ro arm64.nosme`; `/proc/cpuinfo` Features without `sme` |
+| battery | module 1.3.0 loaded, BAT0 present=1 status="Not charging" capacity=78 current_now=0 (plugged in); UPower pending-charge 78 % |
+| bridges | clipboard (user unit), battery, time zone all active; time zone America/New_York, nothing rejected |
+| clipboard | Mac to guest (`pbcopy` / `wl-paste`) and guest to Mac (`wl-copy` / `pbpaste`) both carried text |
+| idle | QEMU 0.19 s CPU over 10 s at the desktop (about 2 %), RSS 2.4 GB after the first boot |
+| window | KDEVM_WINDOW=keep: the guest saw 2624x1476 at scale 2 |
+
+Note for the clipboard test over ssh: `wl-copy` stays alive to serve the
+selection and keeps the ssh session open; run it with `setsid -f` and
+redirect its output, or the command never returns.
+
+Not measured here, left to use: sound, the microphone (the new binary's
+signature re-prompts the permission once), Chrome, pinch and two-finger
+swipe, a guest reboot in a small window (the EDK2 fix), the VM's speed with
+its window hidden or the screen locked (the App Nap fix), and the second
+machine.
+
+Promote (when accepted): stop the working VM; merge the branch and tag;
+swap `~/.cache/kdevm` and `~/.cache/kdevm-next`; move the 13d63df runtime
+directory under `~/Artifacts/kdevm-runtime` and point `current` at it; `up`.
+Roll back: the reverse, plus `git checkout v0.2.2`. Nothing to rebuild
+either way, because the 0.2.2 runtime, factory and overlay stay on disk.
+
 ## Rules that are easy to forget
 
 - Stop the VM (`down`) with the version that started it BEFORE updating the
@@ -620,6 +714,14 @@ unless they cost data or signal a foreign process.
 - Per-launch hints reach the guest through QEMU `fw_cfg`
   (`/sys/firmware/qemu_fw_cfg/by_name/opt/kdevm/`), not kernel arguments,
   because the guest boots through UEFI and grub.
+- fedvm (`~/projects/fedvm`) runs this runtime and vendors the same guest
+  files: a pin bump, a launch-line change or a vendored-file change here
+  wants the same pass there, and the promote order is kdevm first (the
+  runtime), then fedvm's `rebuild`.
+- A factory disk kept as `.failed` is flushed (`sync`) before the checks
+  return, since 0.3.0; before that its last writes (service enables, the
+  default target) could be missing, and a boot of it misled (fedvm,
+  2026-11-02).
 
 ## Phase 1: factory
 

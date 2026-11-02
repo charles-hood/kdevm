@@ -11,10 +11,16 @@ Issues and pull requests are welcome. A few things that make them land:
   stack (QEMU, VirGL, Mesa) from the session (KWin, KScreen, Plasma); quote
   it.
 - **Keep the runtime build theirs.** `runtime/build.sh` runs try-omarchy's
-  build script unchanged apart from the product-name string. If you need a
-  different QEMU patch, propose it upstream at
-  [omacom/try-omarchy](https://github.com/omacom/try-omarchy) first; kdevm
-  tracks their pin.
+  build script unchanged; the one edit is the helper line that names the
+  process its bridges attach to. If you need a different QEMU patch, propose
+  it upstream at [omacom/try-omarchy](https://github.com/omacom/try-omarchy)
+  first; kdevm tracks their pin.
+- **A pin bump is a pair of changes.** fedvm (the Fedora sibling) runs this
+  repo's built runtime and vendors the same guest files at the same
+  upstream commit. When `runtime/pin.txt` moves, re-copy `guest/vendor/`
+  here and there, and check the helper's bridge contract and the guest
+  pieces in both; the runbook's "Resync to try-omarchy v1.3.0" shows one
+  such pass.
 - **Measure before and after.** Idle CPU and footprint with try-omarchy's
   `scripts/profile-process.py` (it checks the VM is actually running through
   QMP), boot time with `up` to a Wayland socket. Numbers go in

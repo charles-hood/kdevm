@@ -55,7 +55,7 @@ python3 -c 'import json; json.load(open("guest/files/firefox-policies.json"))' &
 #     through; everything else a host could send is rejected (run in memory
 #     against a throwaway zoneinfo, no bytecode written)
 mkdir -p "$T/zi/America"; : > "$T/zi/America/New_York"; : > "$T/zi/UTC"
-python3 - guest/files/kdevm-timezone "$T/zi" <<'PYZ' && pass "time zone receiver: 2 real zones accepted, 15 hostile or malformed messages rejected" || fail "time zone receiver validation"
+python3 - guest/files/kdevm-timezone "$T/zi" <<'PYZ' && pass "time zone receiver: 2 real zones accepted, the bridge's wake prompt skipped, 16 hostile or malformed messages rejected" || fail "time zone receiver validation"
 import json, sys
 ns = {"__name__": "kdevm_timezone"}
 exec(compile(open(sys.argv[1]).read(), sys.argv[1], "exec"), ns)
@@ -63,9 +63,11 @@ zone_from, zi = ns["zone_from"], sys.argv[2]
 msg = lambda zone, **more: json.dumps({"type": "timezone", "zone": zone, **more}).encode() + b"\n"
 for good in ("America/New_York", "UTC"):
     assert zone_from(msg(good), zi) == good, good
+assert zone_from(b'{"type": "wake"}\n', zi) is None   # the helper's wake prompt (v1.3.0): nothing to do, no complaint
 bad = [msg("../../etc/passwd"), msg("America/../UTC"), msg("/etc/passwd"), msg("Mars/Olympus"),
        msg("America"), msg(""), msg(123), msg(None), msg("UTC; reboot"), msg("UTC\n"), msg("A" * 129),
-       msg("UTC", extra=1), json.dumps({"type": "clipboard", "zone": "UTC"}).encode(), b"[]\n", b"\xff\xfe not json\n"]
+       msg("UTC", extra=1), json.dumps({"type": "clipboard", "zone": "UTC"}).encode(), b"[]\n", b"\xff\xfe not json\n",
+       b'{"type": "wake", "zone": "UTC"}\n']
 for line in bad:
     try:
         zone_from(line, zi)
@@ -424,12 +426,14 @@ src = f"/usr/src/try-omarchy-battery-{version}/"
 for path, vendored in {
     src + "try-omarchy-battery.c": "try-omarchy-battery/try-omarchy-battery.c", src + "Makefile": "try-omarchy-battery/Makefile",
     src + "dkms.conf": "try-omarchy-battery/dkms.conf", "/etc/modules-load.d/95-try-omarchy-battery.conf": "95-try-omarchy-battery.conf",
-    "/usr/local/bin/omarchy-native-battery-bridge": "omarchy-native-battery-bridge",
+    "/usr/bin/omarchy-native-battery-bridge": "omarchy-native-battery-bridge",
     "/etc/systemd/system/omarchy-native-battery-bridge.service": "omarchy-native-battery-bridge.service",
-    "/etc/udev/rules.d/95-omarchy-native-battery.rules": "95-omarchy-native-battery.rules",
+    "/etc/udev/rules.d/70-try-omarchy-battery.rules": "70-try-omarchy-battery.rules",
 }.items():
     assert base64.b64decode(files[path]["content"]) == open(V + vendored, "rb").read(), path
-assert files["/usr/local/bin/omarchy-native-battery-bridge"]["permissions"] == "0755"
+assert files["/usr/bin/omarchy-native-battery-bridge"]["permissions"] == "0755"
+# the vendored unit starts the bridge where it is installed
+assert "ExecStart=/usr/bin/omarchy-native-battery-bridge" in base64.b64decode(files["/etc/systemd/system/omarchy-native-battery-bridge.service"]["content"]).decode()
 run = [" ".join(c) if isinstance(c, list) else c for c in seed["runcmd"]]
 assert any(f"dkms install try-omarchy-battery/{version} " in c for c in run) and "systemctl enable omarchy-native-battery-bridge.service" in run
 assert {"dkms", "linux-headers-arm64", "powerdevil"} <= set(seed["packages"])
@@ -442,8 +446,40 @@ assert "BatteryCriticalAction=0" in pd and pd.count("TurnOffDisplayWhenIdle=fals
 assert any("s/^CriticalPowerAction=.*/CriticalPowerAction=Ignore/" in c and "/etc/UPower/UPower.conf" in c for c in run)
 assert "grep -qx 'CriticalPowerAction=Ignore' /etc/UPower/UPower.conf" in open("guest/factory.zsh").read()
 port = "dev.tryomarchy.battery"
-assert f"name={port}" in open("kdevm.sh").read() and port in open(V + "omarchy-native-battery-bridge").read() and port in open(V + "95-omarchy-native-battery.rules").read()
+assert f"name={port}" in open("kdevm.sh").read() and port in open(V + "omarchy-native-battery-bridge").read() and port in open(V + "70-try-omarchy-battery.rules").read()
 PYB
+  # 7c. clipboard: the vendored bridge, unit and rule reach the seed byte for
+  #     byte, the unit starts the bridge where it is installed, and the port
+  #     name is the same in launcher, agent and rule
+  .venv/bin/python - "$T/ud.yaml" <<'PYC' && pass "clipboard: vendored files rendered byte for byte at the paths the unit names; port name consistent" || fail "clipboard pieces in the rendered user-data"
+import base64, sys, yaml
+seed = yaml.safe_load(open(sys.argv[1])); files = {f["path"]: f for f in seed["write_files"]}
+V = "guest/vendor/"
+for path, vendored in {"/usr/bin/omarchy-native-clipboard-bridge": "omarchy-native-clipboard-bridge",
+                       "/etc/systemd/user/omarchy-native-clipboard-bridge.service": "omarchy-native-clipboard-bridge.service",
+                       "/etc/udev/rules.d/70-try-omarchy-clipboard.rules": "70-try-omarchy-clipboard.rules",
+                       "/etc/pipewire/pipewire.conf.d/90-try-omarchy-quantum.conf": "90-try-omarchy-quantum.conf"}.items():
+    assert base64.b64decode(files[path]["content"]) == open(V + vendored, "rb").read(), path
+assert files["/usr/bin/omarchy-native-clipboard-bridge"]["permissions"] == "0755"
+assert "ExecStart=/usr/bin/omarchy-native-clipboard-bridge" in base64.b64decode(files["/etc/systemd/user/omarchy-native-clipboard-bridge.service"]["content"]).decode()
+run = [" ".join(c) if isinstance(c, list) else c for c in seed["runcmd"]]
+assert "systemctl --global enable omarchy-native-clipboard-bridge.service" in run
+port = "dev.tryomarchy.clipboard"
+assert f"name={port}" in open("kdevm.sh").read() and port in open(V + "omarchy-native-clipboard-bridge").read() and port in open(V + "70-try-omarchy-clipboard.rules").read()
+PYC
+  # 7d. cpu: the SME drop-in is rendered under /etc/default/grub.d, update-grub
+  #     runs after it and before the services are enabled, and the factory's
+  #     checks fail the build if grub.cfg did not take it
+  .venv/bin/python - "$T/ud.yaml" <<'PYS' && pass "cpu: arm64.nosme grub drop-in rendered, update-grub runs, factory checks grub.cfg" || fail "SME drop-in pieces in the rendered user-data"
+import sys, yaml
+seed = yaml.safe_load(open(sys.argv[1])); files = {f["path"]: f for f in seed["write_files"]}
+cfg = files["/etc/default/grub.d/kdevm-cpu.cfg"]
+assert cfg["permissions"] == "0644" and 'GRUB_CMDLINE_LINUX_DEFAULT="$GRUB_CMDLINE_LINUX_DEFAULT arm64.nosme"' in cfg["content"]
+run = [" ".join(c) if isinstance(c, list) else c for c in seed["runcmd"]]
+assert "update-grub" in run and run.index("update-grub") < run.index("systemctl daemon-reload")
+factory = open("guest/factory.zsh").read()
+assert "grep -q 'arm64.nosme' /boot/grub/grub.cfg" in factory and "modinfo -k \"$krel\" -F version try_omarchy_battery" in factory
+PYS
 else
   echo "SKIP  YAML rendering and the rendered-seed checks (no .venv with PyYAML; see header)"
 fi
@@ -618,7 +654,7 @@ fi
 
 # 12b. two runtime builds cannot share a scratch checkout or a runtime root:
 #      a builder that finds either lock held refuses before touching the
-#      checkout (a concurrent build would revert its rebrand edits). The lock
+#      checkout (a concurrent build would revert its helper edit). The lock
 #      is inherited by what a build starts, so it also holds after the
 #      builder itself is SIGKILLed, for as long as one of its children lives.
 cat > "$T/treeholder.zsh" <<'EOF'
@@ -696,6 +732,29 @@ chmod +x "$T/fakebin3/ps"; before=$(cat "$T/v12d/qemu.pid" "$T/v12d/bridge-clipb
 out=$(PATH="$T/netstub:$T/fakebin3:$PATH" KDEVM_TEST_PSCOUNT="$T/v12d/pscount" KDEVM_TEST_NETLOG=/dev/null KDEVM_STATE="$T/v12d" KDEVM_RUNTIME_ROOT="$T/fakert4" ./kdevm.sh status 2>&1)
 if [[ "$out" == *"qemu: pid $FQ2"* && "$(cat "$T/v12d/qemu.pid" "$T/v12d/bridge-clipboard.pid" 2>/dev/null)" == "$before" ]]; then pass "status: a QEMU whose identity changes between lookups costs no record (one inspection, nothing written)"; else fail "status mutated a record ($(ls "$T/v12d" | tr '\n' ' '); lookups: $(cat "$T/v12d/pscount" 2>/dev/null))"; fi
 kill $FQ2 2>/dev/null; wait $FQ2 2>/dev/null
+
+# 12d. the runtime follows runtime/pin.txt: a staged runtime whose `current`
+#      points at another pin is rebuilt (here: refused by the offline guard,
+#      which proves the builder was called), one at the pinned commit is not,
+#      and status says what the next up will do. A `current` that is a plain
+#      directory (the fakes above) names no pin and is left alone.
+pin=$(tr -d '[:space:]' < runtime/pin.txt)
+fakestage() { mkdir -p "$1/bin"; : > "$1/bin/kdevm"; : > "$1/bin/omarchy-vm-helper"; chmod +x "$1/bin/"*; }   # dir
+for case in other pinned both; do
+  d="$T/v12d/$case"; other=0000000000000000000000000000000000000000; mkdir -p "$d/state"
+  case $case in
+    other)  fakestage "$d/rt/$other"; ln -s "$d/rt/$other" "$d/rt/current" ;;
+    pinned) fakestage "$d/rt/$pin";   ln -s "$d/rt/$pin"   "$d/rt/current" ;;
+    both)   fakestage "$d/rt/$other"; fakestage "$d/rt/$pin"; ln -s "$d/rt/$other" "$d/rt/current" ;;   # the wanted pin staged earlier, current elsewhere
+  esac
+  out=$(KDEVM_STATE="$d/state" KDEVM_RUNTIME_ROOT="$d/rt" KDEVM_SCRATCH="$d/scratch" KDEVM_SSH_PORT=2298 ./kdevm.sh factory 2>&1); rc=$?
+  st=$(KDEVM_STATE="$d/state" KDEVM_RUNTIME_ROOT="$d/rt" ./kdevm.sh status 2>&1 | head -1)
+  case $case in
+    other)  [[ $rc -ne 0 && "$out" == *"runtime/pin.txt wants $pin"* && "$out" == *"KDEVM_OFFLINE"* && "$st" == *"(runtime/pin.txt wants $pin"* ]] && pass "runtime at another pin: the builder is called (offline guard refused it); status names the wanted pin" || fail "runtime pin follow, other pin (rc=$rc: $out | $st)" ;;
+    pinned) [[ "$out" != *"pin.txt wants"* && "$out" != *"runtime missing"* && "$st" != *"pin.txt wants"* ]] && pass "runtime at the pinned commit: not rebuilt, status quiet" || fail "runtime pin follow, pinned (rc=$rc: $out | $st)" ;;
+    both)   [[ "$out" == *"current now points at it"* && "$out" != *"refusing to fetch or build"* && "$(readlink "$d/rt/current")" == "$d/rt/$pin" && -d "$d/rt/$other" && "$st" != *"pin.txt wants"* ]] && pass "wanted pin staged earlier: current repointed without a build, the other staging kept (the factory's own offline refusal follows)" || fail "runtime pin follow, both staged (rc=$rc: $out | $st | current=$(readlink "$d/rt/current"))" ;;
+  esac
+done
 
 # 13. host bridges, end to end with fakes: a fake QEMU that binds every chardev
 #     socket and answers QMP (system_powerdown ends it), and a fake helper that

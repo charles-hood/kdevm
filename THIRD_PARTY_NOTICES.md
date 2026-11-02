@@ -2,12 +2,12 @@
 
 kdevm is a thin set of scripts. Almost everything that runs is someone else's
 work, pulled in at build time from pinned sources. Nothing from the list
-below is redistributed by this repository except the four small guest files
-under `guest/vendor/` (MIT, see there).
+below is redistributed by this repository except the small guest files
+under `guest/vendor/` (MIT, and one GPL-2.0-only kernel module; see there).
 
 | component | what kdevm uses | license | where it comes from |
 |---|---|---|---|
-| [try-omarchy](https://github.com/omacom/try-omarchy) | the QEMU/VirGL/libslirp build script and its 23 patches, the Swift helper (`omarchy-vm-helper`, clipboard, time zone and battery bridges), guest files vendored verbatim | MIT, except the battery kernel module in `guest/vendor/try-omarchy-battery/`, which is GPL-2.0-only (licence text beside it) | cloned at the commit in `runtime/pin.txt`; vendored files carry their upstream path in `guest/vendor/README.md` |
+| [try-omarchy](https://github.com/omacom/try-omarchy) | the QEMU/VirGL/libslirp build script and its 35 patches, the Swift helper (`omarchy-vm-helper`, clipboard, time zone and battery bridges), guest files vendored verbatim | MIT, except the battery kernel module in `guest/vendor/try-omarchy-battery/`, which is GPL-2.0-only (licence text beside it) | cloned at the commit in `runtime/pin.txt`; vendored files carry their upstream path in `guest/vendor/README.md` |
 | [QEMU](https://www.qemu.org/) | `qemu-system-aarch64` 11.1.1 built from source by try-omarchy's script, staged as `bin/kdevm`, run under HVF | GPL-2.0-only (with LGPL and BSD parts) | gitlab.com/qemu-project, commit pinned in try-omarchy's script |
 | [virglrenderer](https://gitlab.freedesktop.org/virgl/virglrenderer) | the host-side OpenGL replay, built from source with the startergo patch set | MIT | pinned by try-omarchy's script |
 | [libslirp](https://gitlab.freedesktop.org/slirp/libslirp) | user-mode networking | BSD-3-Clause | pinned by try-omarchy's script |
@@ -19,11 +19,13 @@ under `guest/vendor/` (MIT, see there).
 | Google Chrome (arm64 .deb) | installed inside the guest at factory build | [Google Chrome Terms of Service](https://www.google.com/chrome/terms/) | dl.google.com, downloaded at factory build; you accept Google's terms by building the factory |
 | `profile-process.py` (try-omarchy) | used by hand for the measurements in `docs/runbook.md`; not part of kdevm | MIT | try-omarchy checkout |
 
-The patch set is described in `docs/patches.md`. kdevm modifies exactly one
-patch at build time, `qemu-cocoa-product-identity.patch`, replacing the
-product name string (and the same string on one line of the helper's
-source, the name of the process its bridges accept); the modified patch is regenerated from the pinned
-upstream file on every build and is not stored here.
+The patch set is described in `docs/patches.md`. kdevm applies every patch
+as upstream ships it. The one change to their tree at build time is one line
+of the helper's source (the name of the process its bridges accept, "Try
+Omarchy" to "kdevm"); the edit is made on the pinned checkout on every build
+and is not stored here. Before the v1.3.0 resync kdevm also rewrote the
+product name string in `qemu-cocoa-product-identity.patch`; that patch now
+takes the name from QEMU's `-name`.
 
 The QEMU binary kdevm builds is GPL-2.0 software. This repository does not
 distribute it; if you distribute a built runtime, QEMU's license terms apply

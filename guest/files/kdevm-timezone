@@ -5,6 +5,10 @@ The host bridge (omarchy-vm-helper --bridge-native-timezone, started by
 kdevm.sh) writes one JSON line, {"type": "timezone", "zone": "<IANA name>"},
 to this virtio port every five seconds. The zone is applied through
 timedatectl when it differs from the guest's, so Plasma's clock follows.
+The same bridge can write {"type": "wake"} when something on the Mac posts
+its wake notification (the Try Omarchy app does, on Mac wake; nothing in
+kdevm does): a prompt for a guest clock check that kdevm does not act on,
+so it is skipped without a word.
 The Mac always wins: a zone chosen inside the guest is put back within
 seconds. To pin a zone, start the VM with KDEVM_TIMEZONE=off: no port, and
 udev never starts this service. Only the zone is set; the clock itself stays
@@ -22,9 +26,12 @@ LOCALTIME = "/etc/localtime"
 
 
 def zone_from(line, zoneinfo=ZONEINFO):
-    """The zone named by one message, or ValueError. Only the plain relative
-    name of a file under zoneinfo gets through."""
+    """The zone named by one message, or ValueError; None for the bridge's
+    wake prompt. Only the plain relative name of a file under zoneinfo gets
+    through."""
     message = json.loads(line)
+    if message == {"type": "wake"}:
+        return None
     if not isinstance(message, dict) or set(message) != {"type", "zone"} or message["type"] != "timezone":
         raise ValueError("not a time zone message")
     zone = message["zone"]
@@ -59,6 +66,8 @@ def main():
                 zone = zone_from(line, ZONEINFO)
             except ValueError as error:
                 print(f"rejected a message from the host: {error}", flush=True)
+                continue
+            if zone is None:
                 continue
             if os.path.realpath(LOCALTIME) == os.path.realpath(os.path.join(ZONEINFO, zone)):
                 continue

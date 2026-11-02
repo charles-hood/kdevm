@@ -11,7 +11,7 @@ ConditionPathExists=/sys/devices/platform/try-omarchy-battery/state
 StartLimitIntervalSec=0
 
 [Service]
-ExecStart=/usr/local/bin/omarchy-native-battery-bridge
+ExecStart=/usr/bin/omarchy-native-battery-bridge
 Restart=always
 RestartSec=1
 

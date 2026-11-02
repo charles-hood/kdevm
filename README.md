@@ -211,10 +211,11 @@ native Wayland, hardware compositing, rasterization and WebGL on
 ## How it works
 
 The host runtime is [try-omarchy](https://github.com/omacom/try-omarchy)'s
-patched QEMU 11.1.1 on Apple's Hypervisor.framework (23 patches: Cocoa
+patched QEMU 11.1.1 on Apple's Hypervisor.framework (35 patches: Cocoa
 dynamic display, VirGL on native macOS OpenGL, HVF free-page memory
-reclaim, HDA audio recovery, precise trackpad scroll and pinch, 9p
-ownership mapping, and more), built by their own script from a pinned
+reclaim, HDA audio pacing and recovery, audio devices opened off the main
+lock, no App Nap, precise trackpad scroll, pinch and swipe, 9p ownership
+mapping, and more), built by their own script from a pinned
 commit, plus their Swift helper for the clipboard, time zone and battery
 bridges. Everything Omarchy-, Arch- and Hyprland-specific is left behind.
 The guest is an ordinary Debian cloud image provisioned once by cloud-init
@@ -234,15 +235,15 @@ fw_cfg opt/kdevm/*         <-- per-launch hints (scale)                     <-- 
 ```
 
 - **Runtime.** `runtime/build.sh` clones try-omarchy at `runtime/pin.txt`,
-  runs their `macos/build-qemu-gpu-runtime.sh` unchanged except for one
-  string (the product name in the Cocoa identity patch becomes "kdevm"),
-  builds the Swift helper with `swift build` (the same string changed on
-  the one line that names the process its bridges will attach to), and
-  stages both. QEMU is staged as `bin/kdevm`, as their app build stages it
-  as "Try Omarchy": the Dock, Force Quit and crash reports label a bare
-  executable with its file name. The result is ad-hoc signed with the
-  hypervisor entitlement. `docs/patches.md` lists
-  the 23 patches and what each does.
+  runs their `macos/build-qemu-gpu-runtime.sh` unchanged, builds the Swift
+  helper with `swift build` after changing one string on the one line that
+  names the process its bridges will attach to ("Try Omarchy" becomes
+  "kdevm"), and stages both. QEMU is staged as `bin/kdevm`, as their app
+  build stages it as "Try Omarchy": the Dock, Force Quit and crash reports
+  label a bare executable with its file name; the window, menu and process
+  name come from `-name kdevm`. The result is ad-hoc signed with the
+  hypervisor entitlement. `docs/patches.md` lists the 35 patches and what
+  each does.
 - **Guest.** `guest/factory.zsh` (run by `guest/build.sh` directly, or by
   `kdevm.sh factory`, `rebuild` and a first-run `up`, always in the process
   that holds the lifecycle lock) downloads and verifies the Debian 13 generic
@@ -297,6 +298,18 @@ mirrors the Mac keyboard and language and recovers the guest clock after the
 Mac sleeps; neither has been sized for kdevm. See the roadmap section of
 [docs/plan.md](docs/plan.md).
 
+## Sister project: fedvm
+
+[fedvm](../fedvm) is the same script set with a Fedora guest, kept as its
+own repo rather than a distro switch here. It builds no runtime: it runs
+this repo's `bin/kdevm` and helper through `KDEVM_RUNTIME_ROOT`, and it
+vendors the same try-omarchy guest files at the same commit. So a change to
+`runtime/pin.txt`, to the launcher's QEMU command line, or to the vendored
+guest pieces here is usually a change there too, and a new runtime takes
+effect for fedvm the moment `current` moves (its guest catches up on its
+next `rebuild`). Things that are Debian's alone (apt, GRUB drop-ins, the
+cloud image) stay here.
+
 ## Documentation
 
 - [docs/runbook.md](docs/runbook.md): provenance, every measurement, every
@@ -304,7 +317,7 @@ Mac sleeps; neither has been sized for kdevm. See the roadmap section of
   held.
 - [docs/plan.md](docs/plan.md): the plan this was built from, including the
   two external reviews it absorbed.
-- [docs/patches.md](docs/patches.md): the 23 runtime patches.
+- [docs/patches.md](docs/patches.md): the 35 runtime patches.
 - [CHANGELOG.md](CHANGELOG.md), [CONTRIBUTING.md](CONTRIBUTING.md),
   [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
