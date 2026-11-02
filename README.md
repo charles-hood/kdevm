@@ -204,8 +204,8 @@ native Wayland, hardware compositing, rasterization and WebGL on
 | | |
 |---|---|
 | the repo | `kdevm.sh`, `lib/kdevm-common.zsh` (kernel lock, process identity, QMP, config), `guest/factory.zsh` (the factory build as a function), the build scripts, the cloud-init template, vendored guest agents, `tests/checks.sh`, docs. Nothing large, nothing secret. |
-| `$KDEVM_RUNTIME_ROOT/<pin>/` | built QEMU + helper, `provenance.txt`, `current` symlink. Slow to rebuild, keep it. Beside the pins: `TryOmarchy.icns`, the Dock icon `up` builds (the name is the one the runtime looks for). |
-| `$KDEVM_STATE/` | base image, `factory.qcow2`, `work.qcow2`, `efivars.fd`, `run/` sockets, logs. Disposable. |
+| `$KDEVM_RUNTIME_ROOT/<pin>/` | built QEMU + helper, `provenance.txt`, `current` symlink. Slow to rebuild, keep it. Nothing else is written there (a `TryOmarchy.icns` beside the pins is a leftover from before 0.3.0 and can go). |
+| `$KDEVM_STATE/` | base image, `factory.qcow2`, `work.qcow2`, `efivars.fd`, `run/` sockets, `icon.icns` (the Dock icon, rebuilt on every `up`), logs. Disposable. |
 | `$KDEVM_SHARE/` | the one shared folder. An exchange folder, not a build tree. |
 
 ## How it works

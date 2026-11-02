@@ -244,6 +244,12 @@ house rule asks for two consecutive clean passes; this is the first.
 
 ## Dock icon (2026-10-03, Charles)
 
+(Since the v1.3.0 resync the icon is built into the state directory as
+`icon.icns` and named to QEMU through `TRYOMARCHY_PRODUCT_ICON`, which
+upstream added in v1.1.0; the runtime-root file described below was shared
+by every project on the runtime, and fedvm and kdevm overwrote each other's
+on every `up`. Charles, 2026-11-02: "How is that ok?" It was not.)
+
 The Dock showed the generic black "exec" icon for the running VM. Cause: the
 Cocoa product-identity patch replaces QEMU's own icon lookup with
 `cocoa_set_product_icon()`, which loads `TryOmarchy.icns` from three

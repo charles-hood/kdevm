@@ -543,6 +543,7 @@ if [[ -x "$QI" ]]; then
   cat > "$FRT/bin/kdevm" <<'EOF'
 #!/bin/zsh -f
 # fake QEMU: bind the QMP and clipboard sockets named on the command line, then hang
+print -r -- "${TRYOMARCHY_PRODUCT_ICON:-unset}" > "$KDEVM_STATE/fakeqemu.icon"   # what the Dock icon lookup would see
 qmp=""; clip=""
 for a in "$@"; do
   [[ "$a" == unix:*,server=on,wait=off ]] && { qmp="${a#unix:}"; qmp="${qmp%%,*}"; }
@@ -566,10 +567,12 @@ EOF
   out=$(KDEVM_STATE="$T/v10" KDEVM_RUNTIME_ROOT="$T/fakert" KDEVM_FW_CODE="$T/v10/code.fd" KDEVM_FW_VARS="$T/v10/vars.fd" KDEVM_SHARE="$T/v10/share" KDEVM_WINDOW=keep KDEVM_ICON= ./kdevm.sh up 2>&1); rc=$?
   left=$(pgrep -f "$FRT/bin/kdevm" || true)
   if [[ $rc -ne 0 && -z "$left" && ! -e "$T/v10/qemu.pid" && -z "$(ls "$T/v10/run" 2>/dev/null)" && "$out" == *"failed to start"* ]]; then pass "failed readiness: fake QEMU terminated, non-zero exit, no pid file, no socket left"; else fail "failed readiness (rc=$rc, leftover='$left')"; [[ -n "$left" ]] && kill $left 2>/dev/null; fi
-  # 10a. Dock icon: the same up built TryOmarchy.icns in the runtime root (where
-  #      the patched QEMU looks) from the repo's PNG and left no work files
-  ICNS="$T/fakert/TryOmarchy.icns"
-  if [[ "$(head -c 4 "$ICNS" 2>/dev/null)" == icns && -z "$(ls "$T/fakert" | grep -v -x -e current -e TryOmarchy.icns)" && ! -e "$T/v10/icon.iconset" && "$out" != *"Dock icon"* ]]; then pass "Dock icon: icns built in the runtime root from the default PNG, no work files left"; else fail "Dock icon install ($(ls "$T/fakert" | tr '\n' ' '))"; fi
+  # 10a. Dock icon: the same up built icon.icns in the STATE directory from the
+  #      repo's PNG, named it to QEMU through TRYOMARCHY_PRODUCT_ICON, wrote
+  #      nothing into the runtime root (shared by every project on the
+  #      runtime) and left no work files
+  ICNS="$T/v10/icon.icns"
+  if [[ "$(head -c 4 "$ICNS" 2>/dev/null)" == icns && "$(cat "$T/v10/fakeqemu.icon" 2>/dev/null)" == "${ICNS:a}" && -z "$(ls "$T/fakert" | grep -v -x current)" && ! -e "$T/v10/icon.iconset" && -z "$(ls "$T/v10" | grep '^icon\.new')" && "$out" != *"Dock icon"* ]]; then pass "Dock icon: icns built in the state directory from the default PNG and passed to QEMU by path; runtime root untouched, no work files left"; else fail "Dock icon install (rt: $(ls "$T/fakert" | tr '\n' ' '); qemu saw: $(cat "$T/v10/fakeqemu.icon" 2>/dev/null))"; fi
   # 10b. start-time capture fails right after launch: the child is terminated, not orphaned
   rm -rf "$T/v10/run" "$T/v10/work.qcow2" "$T/v10/vars.fd"; : > "$T/v10/vars.fd"
   cat > "$T/fakebin2/ps" <<'EOF'
@@ -587,7 +590,7 @@ EOF
   printf 'not an image' > "$T/v10/bad.png"; before=$(shasum "$ICNS" 2>/dev/null)
   out=$(PATH="$T/fakebin2:$PATH" KDEVM_STATE="$T/v10" KDEVM_RUNTIME_ROOT="$T/fakert" KDEVM_FW_CODE="$T/v10/code.fd" KDEVM_FW_VARS="$T/v10/vars.fd" KDEVM_SHARE="$T/v10/share" KDEVM_WINDOW=keep KDEVM_ICON="$T/v10/bad.png" ./kdevm.sh up 2>&1); rc=$?
   left=$(pgrep -f "$FRT/bin/kdevm" || true)
-  if [[ "$out" == *"could not build the Dock icon"* && "$out" == *"start time"* && -n "$before" && "$(shasum "$ICNS")" == "$before" && -z "$(ls "$T/fakert" | grep -v -x -e current -e TryOmarchy.icns)" && ! -e "$T/v10/icon.iconset" ]]; then pass "Dock icon: unusable KDEVM_ICON warns, up continues, existing icns untouched"; else fail "Dock icon failure handling (rc=$rc)"; fi
+  if [[ "$out" == *"could not build the Dock icon"* && "$out" == *"start time"* && -n "$before" && "$(shasum "$ICNS")" == "$before" && -z "$(ls "$T/fakert" | grep -v -x current)" && ! -e "$T/v10/icon.iconset" ]]; then pass "Dock icon: unusable KDEVM_ICON warns, up continues, existing icns untouched"; else fail "Dock icon failure handling (rc=$rc)"; fi
   [[ -n "$left" ]] && kill $left 2>/dev/null
 else
   echo "SKIP  failed-readiness probe (no qemu-img)"

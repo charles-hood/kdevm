@@ -66,6 +66,14 @@ verb (`state`).
 - **fedvm is named as the sister project** in the README, CONTRIBUTING and
   the runbook: it runs this runtime and vendors the same guest files, so a
   pin bump here is a pass there too.
+- **The Dock icon lives in the state directory** (`icon.icns`) and reaches
+  QEMU through `TRYOMARCHY_PRODUCT_ICON`, which the new runtime reads. It
+  used to be written into the runtime root under the one name the old
+  runtime looked for, so kdevm and fedvm, which share the runtime,
+  overwrote each other's picture on every `up`. The old
+  `TryOmarchy.icns` beside the pins is no longer written or read by kdevm
+  (the runtime only falls back to it when the variable is unset) and can
+  be deleted.
 - **The time zone receiver skips the helper's wake prompt** (`{"type":
   "wake"}`, which the v1.3.0 bridge can write on the same port) without
   logging a rejection. kdevm does not act on it.

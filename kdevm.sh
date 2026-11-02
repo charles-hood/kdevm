@@ -162,15 +162,18 @@ print(1)' ;;
   esac
 }
 
-# Dock icon. The runtime's Cocoa product-identity patch loads TryOmarchy.icns
-# from the runtime root (three directories above the binary; the file name is
-# compiled in), and without that file the Dock shows the generic "exec" icon.
-# Built on every up (a quarter of a second) from a square PNG: KDEVM_ICON,
-# else the one in the repo. sips can exit 0 without writing anything, so each
-# output is checked; iconutil only writes to a name ending in .icns.
-# Cosmetic: the caller turns a failure into a warning.
+# Dock icon. The runtime's Cocoa product-identity patch loads the icon named
+# by TRYOMARCHY_PRODUCT_ICON (since try-omarchy v1.1.0; before that only a
+# TryOmarchy.icns in the runtime root, a file every project on the runtime
+# had to fight over). It is built on every up (a quarter of a second) from a
+# square PNG, KDEVM_ICON or the one in the repo, into this state directory,
+# so two projects sharing one runtime never touch each other's picture. sips
+# can exit 0 without writing anything, so each output is checked; iconutil
+# only writes to a name ending in .icns. Cosmetic: the caller turns a
+# failure into a warning, and without the file the Dock shows QEMU's own.
+ICNS="${STATE:a}/icon.icns"   # absolute: the runtime ignores a relative TRYOMARCHY_PRODUCT_ICON
 install_icon() {
-  local src="${KDEVM_ICON:-$REPO/assets/kdevm-icon.png}" dest="${RT:h}/TryOmarchy.icns" new="${RT:h}/TryOmarchy.new.$$.icns" set="$STATE/icon.iconset" s f
+  local src="${KDEVM_ICON:-$REPO/assets/kdevm-icon.png}" dest="$ICNS" new="$STATE/icon.new.$$.icns" set="$STATE/icon.iconset" s f
   [[ -f "$src" ]] || return 1
   {
     rm -rf "$set"; mkdir "$set" || return 1
@@ -218,6 +221,7 @@ up() {
   stop_bridges || die "a bridge helper from an earlier run is still tracked and could not be stopped (kdevm.sh status); refusing to start"
   rm -f "${SOCKETS[@]}"
   install_icon || log "warning: could not build the Dock icon from ${KDEVM_ICON:-$REPO/assets/kdevm-icon.png}; the Dock icon is unchanged"
+  [[ -f "$ICNS" ]] && export TRYOMARCHY_PRODUCT_ICON="$ICNS"
   # The helper's bridges accept only a socket owned by this uid with no
   # group/other bits (NativeBridgeSocket.swift); the script-wide umask 077
   # makes QEMU create them that way.
