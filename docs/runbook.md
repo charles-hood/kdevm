@@ -682,6 +682,25 @@ Measured on the M4 Pro, macOS 27.2:
 | idle | QEMU 0.19 s CPU over 10 s at the desktop (about 2 %), RSS 2.4 GB after the first boot |
 | window | KDEVM_WINDOW=keep: the guest saw 2624x1476 at scale 2 |
 
+Quiet window (same day, Charles: "the text noise isn't useful, and I'd
+rather not see it"). What the window showed before sddm, measured on the
+live guest: the firmware's text (EDK2, before any guest code), GRUB's
+output on the display, then a black framebuffer with a blinking cursor and
+getty's login prompt on tty1 for about a second; sddm starts 2.0 s after
+the kernel. The kernel's only console is the serial port (the firmware's
+SPCR table picks it, `/sys/class/tty/console/active` says `ttyAMA0`), so
+no kernel or systemd text ever reached the window, and `quiet` would have
+changed nothing there except to thin the serial log. Done: a second GRUB
+drop-in (`kdevm-console.cfg`: `GRUB_TERMINAL=serial` and
+`vt.global_cursor_blink=0`; NOT `GRUB_TIMEOUT_STYLE=hidden`, which Codex
+caught: GRUB's menu code raises a hidden zero timeout to three seconds when
+no terminal can report a held key, and the serial terminal cannot, so the
+default `menu` style with the image's zero timeout is what boots at once),
+`getty@tty1` masked after
+`update-grub`, and the factory checks grub.cfg and the mask. The firmware
+text stays. Plymouth was considered and rejected: a theme, an initramfs
+rebuild and extra boot time for a phase that already lasts two seconds.
+
 Note for the clipboard test over ssh: `wl-copy` stays alive to serve the
 selection and keeps the ssh session open; run it with `setsid -f` and
 redirect its output, or the command never returns.

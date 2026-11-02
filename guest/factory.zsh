@@ -250,6 +250,9 @@ have=$(/usr/sbin/modinfo -k "$krel" -F version try_omarchy_battery 2>/dev/null)
 if [ -n "$want" ] && [ "$have" = "$want" ]; then echo "ok   try_omarchy_battery version $have"; else echo "FAIL try_omarchy_battery version: module says '$have', dkms.conf says '$want'"; fail=1; fi
 # the SME drop-in (guest/user-data.yaml.tmpl) must have reached grub.cfg: the kernel the factory boots next reads it
 if grep -q 'arm64.nosme' /boot/grub/grub.cfg; then echo "ok   arm64.nosme in grub.cfg"; else echo "FAIL arm64.nosme missing from /boot/grub/grub.cfg (update-grub did not take /etc/default/grub.d/kdevm-cpu.cfg)"; fail=1; fi
+# a quiet window (guest/user-data.yaml.tmpl): GRUB on serial, no cursor, no getty on tty1
+if grep -q 'terminal_output serial' /boot/grub/grub.cfg && grep -q 'vt.global_cursor_blink=0' /boot/grub/grub.cfg; then echo "ok   GRUB on the serial port, cursor off (grub.cfg)"; else echo "FAIL grub.cfg lacks the serial terminal or vt.global_cursor_blink=0 (/etc/default/grub.d/kdevm-console.cfg)"; fail=1; fi
+if [ "$(systemctl is-enabled getty@tty1.service 2>/dev/null)" = masked ]; then echo "ok   getty@tty1 masked"; else echo "FAIL getty@tty1 is $(systemctl is-enabled getty@tty1.service 2>&1)"; fail=1; fi
 # nothing in the guest may act on the mirrored battery, and the guest may not sleep
 if grep -qx 'CriticalPowerAction=Ignore' /etc/UPower/UPower.conf && grep -qx 'AllowRiskyCriticalPowerAction=true' /etc/UPower/UPower.conf; then echo "ok   UPower critical action: Ignore"; else echo "FAIL UPower would act on a critical battery ($(grep -E '^(CriticalPowerAction|AllowRisky)' /etc/UPower/UPower.conf | tr '\n' ' '))"; fail=1; fi
 if [ "$(busctl call org.freedesktop.login1 /org/freedesktop/login1 org.freedesktop.login1.Manager CanSuspend 2>/dev/null)" = 's "no"' ]; then echo "ok   sleep disabled (logind CanSuspend=no)"; else echo "FAIL the guest can sleep (logind CanSuspend is not no)"; fail=1; fi

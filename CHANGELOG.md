@@ -74,6 +74,13 @@ verb (`state`).
   `TryOmarchy.icns` beside the pins is no longer written or read by kdevm
   (the runtime only falls back to it when the variable is unset) and can
   be deleted.
+- **A quiet window before the desktop.** GRUB's text now goes to the
+  serial port (where `kdevm.sh console` reads it), the framebuffer cursor
+  no longer blinks on the black screen, and the login prompt that flashed on
+  tty1 before sddm is gone (`getty@tty1` masked; the serial login stays).
+  The firmware's one or two seconds of text are written before any guest
+  code runs and cannot be helped. The kernel's only console was already the
+  serial port, so no kernel or systemd text reached the window.
 - **The time zone receiver skips the helper's wake prompt** (`{"type":
   "wake"}`, which the v1.3.0 bridge can write on the same port) without
   logging a rejection. kdevm does not act on it.

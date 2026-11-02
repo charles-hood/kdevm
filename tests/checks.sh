@@ -470,7 +470,7 @@ PYC
   # 7d. cpu: the SME drop-in is rendered under /etc/default/grub.d, update-grub
   #     runs after it and before the services are enabled, and the factory's
   #     checks fail the build if grub.cfg did not take it
-  .venv/bin/python - "$T/ud.yaml" <<'PYS' && pass "cpu: arm64.nosme grub drop-in rendered, update-grub runs, factory checks grub.cfg" || fail "SME drop-in pieces in the rendered user-data"
+  .venv/bin/python - "$T/ud.yaml" <<'PYS' && pass "cpu and console: arm64.nosme and the quiet-window drop-ins rendered, update-grub then getty@tty1 masked, factory checks all of it" || fail "SME drop-in pieces in the rendered user-data"
 import sys, yaml
 seed = yaml.safe_load(open(sys.argv[1])); files = {f["path"]: f for f in seed["write_files"]}
 cfg = files["/etc/default/grub.d/kdevm-cpu.cfg"]
@@ -479,6 +479,11 @@ run = [" ".join(c) if isinstance(c, list) else c for c in seed["runcmd"]]
 assert "update-grub" in run and run.index("update-grub") < run.index("systemctl daemon-reload")
 factory = open("guest/factory.zsh").read()
 assert "grep -q 'arm64.nosme' /boot/grub/grub.cfg" in factory and "modinfo -k \"$krel\" -F version try_omarchy_battery" in factory
+# a quiet window: GRUB to serial and no cursor through a second drop-in, getty@tty1 masked after update-grub, both checked by the factory
+con = files["/etc/default/grub.d/kdevm-console.cfg"]["content"]
+assert "GRUB_TERMINAL=serial" in con and 'GRUB_CMDLINE_LINUX_DEFAULT="$GRUB_CMDLINE_LINUX_DEFAULT vt.global_cursor_blink=0"' in con
+assert "systemctl mask getty@tty1.service" in run and run.index("update-grub") < run.index("systemctl mask getty@tty1.service")
+assert "terminal_output serial" in factory and "getty@tty1.service" in factory
 PYS
 else
   echo "SKIP  YAML rendering and the rendered-seed checks (no .venv with PyYAML; see header)"

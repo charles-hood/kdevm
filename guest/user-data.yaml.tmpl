@@ -306,6 +306,22 @@ write_files:
     content: |
       # kdevm: hide SME from the guest (see guest/user-data.yaml.tmpl)
       GRUB_CMDLINE_LINUX_DEFAULT="$GRUB_CMDLINE_LINUX_DEFAULT arm64.nosme"
+  # ---- a quiet window: the firmware's text cannot be helped (EDK2 writes it
+  #      before any guest code runs), but everything after it can. GRUB's own
+  #      output goes to the serial port, where `kdevm.sh console` reads it
+  #      (the menu already has a zero timeout; the timeout style stays
+  #      `menu`: `hidden` makes GRUB wait three seconds on a serial terminal,
+  #      which cannot report a held key); the kernel's only console is
+  #      the serial port too (the firmware's SPCR table), so no kernel or
+  #      systemd text reaches the window, and the blinking framebuffer cursor
+  #      is turned off. getty on tty1, whose login prompt flashed before
+  #      sddm, is masked below; the serial login stays.
+  - path: /etc/default/grub.d/kdevm-console.cfg
+    permissions: "0644"
+    content: |
+      # kdevm: GRUB on the serial port, no cursor on the display (see guest/user-data.yaml.tmpl)
+      GRUB_TERMINAL=serial
+      GRUB_CMDLINE_LINUX_DEFAULT="$GRUB_CMDLINE_LINUX_DEFAULT vt.global_cursor_blink=0"
   # ---- powerdevil is installed for its battery applet only. The battery is
   #      the Mac's, and so is every decision about it: nothing happens at a
   #      critical level, and the screen is not dimmed or turned off on idle
@@ -400,8 +416,10 @@ runcmd:
   # one the factory boots next), not the one cloud-init happens to run on.
   # The factory's capability checks fail the build if it is missing.
   - [ sh, -c, "dkms install try-omarchy-battery/1.3.0 -k \"$(ls -1 /lib/modules | sort -V | tail -1)\"" ]
-  # Kernel command line: the drop-in above reaches /boot/grub/grub.cfg here.
+  # Kernel command line and GRUB terminal: the drop-ins above reach /boot/grub/grub.cfg here.
   - update-grub
+  # no login prompt on the display before sddm (the serial getty stays)
+  - systemctl mask getty@tty1.service
   # UPower acts on a critical battery by itself, whatever powerdevil is told:
   # with sleep disabled its HybridSleep falls through to PowerOff, and a guest
   # at 1% powered off 22 s later (2026-10-03). The battery is the Mac's to act
