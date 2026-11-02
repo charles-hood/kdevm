@@ -300,8 +300,8 @@ Mac sleeps; neither has been sized for kdevm. See the roadmap section of
 
 ## Sister project: fedvm
 
-[fedvm](../fedvm) is the same script set with a Fedora guest, kept as its
-own repo rather than a distro switch here. It builds no runtime: it runs
+fedvm is the same script set with a Fedora guest, kept as its own repo
+(not published) rather than a distro switch here. It builds no runtime: it runs
 this repo's `bin/kdevm` and helper through `KDEVM_RUNTIME_ROOT`, and it
 vendors the same try-omarchy guest files at the same commit. So a change to
 `runtime/pin.txt`, to the launcher's QEMU command line, or to the vendored
